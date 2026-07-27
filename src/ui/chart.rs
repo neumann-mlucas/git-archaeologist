@@ -11,15 +11,12 @@ use crate::app::AppState;
 use crate::ui::{palette, panel_block, DIM};
 
 pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
-    let metric = match state.filters.metric {
-        crate::query::Metric::Loc => "LOC",
-        crate::query::Metric::Churn => "churn",
-    };
+    let lens = state.filters.lens.label();
     let view = match state.filters.view {
         crate::query::View::Cumulative => "cumulative",
         crate::query::View::Delta => "delta",
     };
-    let title = format!(" Evolution — {metric} ({view}) ");
+    let title = format!(" Evolution — {lens} ({view}) ");
     let block = panel_block(&title, focused);
 
     if state.series.is_empty() {

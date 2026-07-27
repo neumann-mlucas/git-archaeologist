@@ -11,6 +11,7 @@ pub struct Config {
     pub default_bucket: String,
     pub default_view: String,
     pub default_group: String,
+    pub default_lens: String,
     pub palette: String,
 }
 
@@ -20,6 +21,7 @@ impl Default for Config {
             default_bucket: "auto".into(),
             default_view: "cumulative".into(),
             default_group: "language".into(),
+            default_lens: "structure".into(),
             palette: "default".into(),
         }
     }
@@ -48,6 +50,9 @@ pub struct RawIdentity {
 pub struct Loaded {
     pub config: Config,
     pub aliases: Aliases,
+    /// Path to the user's aliases.toml — currently unused post-Lens-reframe,
+    /// held for the pending Ownership-lens first-run wizard.
+    #[allow(dead_code)]
     pub aliases_path: PathBuf,
 }
 
@@ -68,6 +73,14 @@ impl Loaded {
             "author" => crate::query::GroupBy::Author,
             "module" => crate::query::GroupBy::Module,
             _ => crate::query::GroupBy::Language,
+        }
+    }
+
+    pub fn default_lens(&self) -> crate::query::Lens {
+        match self.config.default_lens.trim().to_lowercase().as_str() {
+            "activity" | "churn" => crate::query::Lens::Activity,
+            "ownership" | "author" | "blame" => crate::query::Lens::Ownership,
+            _ => crate::query::Lens::Structure,
         }
     }
 
@@ -104,6 +117,10 @@ fn read_toml<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T> 
 /// Merge `loser_id` into `keeper_id`: append/update the user aliases file so
 /// the loser's raw (name, email) pairs canonicalize onto the keeper's identity,
 /// then remap the DB in one pass. Repo `.mailmap` is never written.
+///
+/// Currently unused — the auto-heuristic modal was removed as part of the
+/// Lens reframe. Kept for the pending Ownership-wizard first-run flow.
+#[allow(dead_code)]
 pub fn merge_authors(
     aliases_path: &Path,
     conn: &Connection,

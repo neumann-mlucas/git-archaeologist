@@ -82,13 +82,6 @@ fn render_title(f: &mut Frame, state: &AppState, area: Rect) {
         Span::raw("  "),
         Span::styled(scope, Style::default().fg(Color::Yellow)),
     ];
-    if state.unmerged_count > 0 {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("⚠ {} unmerged", state.unmerged_count),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
-    }
     if state.shallow {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -118,14 +111,13 @@ fn render_footer(f: &mut Frame, state: &AppState, area: Rect) {
         ("Tab", "group"),
         ("↵", "drill"),
         ("⌫", "up"),
+        ("L", "lens"),
         ("d", "delta"),
-        ("M", "metric"),
         ("s", "sort"),
         ("b", "bucket"),
         ("f", "dates"),
         ("l", "lang"),
         ("a", "author"),
-        ("m", "merge"),
         ("r", "reindex"),
         ("?", "help"),
         ("q", "quit"),

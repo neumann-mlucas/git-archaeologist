@@ -84,9 +84,20 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
 - [ ] CSV/JSON export current view
 - [ ] Cross-branch compare
 - [ ] Rename tracking behind flag
-- [ ] Churn-by-language series (needs path→language mapping join)
-- [ ] LOC-by-author per-bucket last-touch attribution (replace cumulative-net-churn proxy)
+- [x] Churn-by-language series (path→lang map from latest snapshot)
 - [ ] Path-picker modal using `query::subpaths`
 - [ ] Stacked-area chart (youplot-style) — needs custom widget, ratatui Chart is line-only
-- [ ] Search-within-modal for author + language checklists (`/` filter)
 - [ ] Bench harness on Linux kernel subset — validate 2-min budget
+
+## v2 — architectural rewrite (sliced)
+
+- [x] **Slice 1** Lens reframe: replace `Metric` with `Lens { Structure | Activity | Ownership }`;
+      valid group_by set per lens; delete unmerged-heuristic + AliasMerge modal;
+      delete cumulative-net-churn-as-author-LOC hack; delete apply_view churn-Delta special-case.
+- [ ] **Slice 2** Kill `git log --numstat` subprocess. Compute churn in-process via `gix` diff.
+- [ ] **Slice 3** Drop SQLite. Store cache as Parquet + query via DuckDB (columnar OLAP fit).
+- [ ] **Slice 4** Drop tokei. Semantic LOC via tree-sitter grammars.
+- [ ] **Slice 5** Real Ownership lens: `git blame --incremental` cache, per-line author.
+- [ ] **Slice 6** UX: command palette (`:`), `/` fuzzy filter in modals, sparkline column
+      in Breakdown, interactive x-axis zoom/pan, diff-plot mode (two ranges side-by-side).
+- [ ] **Slice 7** Ownership first-run wizard (replaces the deleted heuristic-auto-detect).

@@ -5,7 +5,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::AppState;
-use crate::query::{GroupBy, Metric, View};
+use crate::query::{GroupBy, View};
 use crate::ui::panel_block;
 
 pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
@@ -21,10 +21,7 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
         View::Cumulative => "cumulative",
         View::Delta => "delta",
     };
-    let metric = match state.filters.metric {
-        Metric::Loc => "LOC",
-        Metric::Churn => "churn",
-    };
+    let lens = state.filters.lens.label();
     let langs = if state.filters.languages.is_empty() {
         "all".to_string()
     } else {
@@ -52,7 +49,7 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
     line1.extend(kv("From", from));
     line1.extend(kv("To", to));
     line1.extend(kv("Bucket", bucket));
-    line1.extend(kv("Metric", metric.into()));
+    line1.extend(kv("Lens", lens.into()));
     line1.extend(kv("View", view.into()));
 
     let mut line2: Vec<Span> = vec![Span::raw(" ")];

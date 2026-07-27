@@ -57,7 +57,6 @@ pub fn render(f: &mut Frame, state: &AppState) {
                 *cursor,
             )
         }
-        Modal::AliasMerge { pairs, cursor } => render_alias_merge(f, state, pairs, *cursor),
         Modal::Help => render_help(f, state),
     }
 }
@@ -129,42 +128,6 @@ fn checklist_labeled(
     f.render_stateful_widget(list, area, &mut ls);
 }
 
-fn render_alias_merge(f: &mut Frame, state: &AppState, pairs: &[(i64, i64)], cursor: usize) {
-    let area = centered_rect(70, 60, f.area());
-    f.render_widget(Clear, area);
-
-    let names = author_name_map(state);
-
-    let items: Vec<ListItem> = pairs
-        .iter()
-        .map(|(a, b)| {
-            let na = names.get(a).cloned().unwrap_or_default();
-            let nb = names.get(b).cloned().unwrap_or_default();
-            ListItem::new(format!("  {na}   ⇄   {nb}"))
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Merge author aliases — [Enter] merge, [Esc] cancel "),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-    let mut ls = ListState::default();
-    ls.select(Some(cursor));
-    f.render_stateful_widget(list, area, &mut ls);
-}
-
-fn author_name_map(state: &AppState) -> std::collections::HashMap<i64, String> {
-    crate::query::list_authors(&state.cache.conn)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, name, email)| (id, format!("{name} <{email}>")))
-        .collect()
-}
-
 fn render_help(f: &mut Frame, state: &AppState) {
     let area = centered_rect(65, 75, f.area());
     f.render_widget(Clear, area);
@@ -182,9 +145,9 @@ fn render_help(f: &mut Frame, state: &AppState) {
         Line::from("   Bksp,  ←     drill out"),
         Line::from(""),
         Line::from(" Views "),
-        Line::from("   Tab          cycle Group-by (lang → author → module)"),
+        Line::from("   L            cycle lens (structure → activity → ownership)"),
+        Line::from("   Tab          cycle Group-by within current lens"),
         Line::from("   d            toggle cumulative / delta"),
-        Line::from("   M            toggle LOC / churn metric"),
         Line::from("   s            cycle sort column"),
         Line::from(""),
         Line::from(" Filters "),
@@ -192,7 +155,6 @@ fn render_help(f: &mut Frame, state: &AppState) {
         Line::from("   f            date range"),
         Line::from("   l            languages"),
         Line::from("   a            authors"),
-        Line::from("   m            merge unmerged identities"),
         Line::from(""),
         Line::from(" Repo "),
         Line::from("   r            force reindex"),

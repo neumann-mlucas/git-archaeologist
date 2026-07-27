@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use crate::cache::Cache;
 use crate::config::Loaded;
 use crate::index::{self, bucket::BucketSize};
-use crate::query::{self, BreakdownRow, Filters, GroupBy, SeriesPoint, View};
+use crate::query::{self, BreakdownRow, Filters, GroupBy, Lens, SeriesPoint, View};
 use crate::repo::Repo;
 use crate::ui;
 
@@ -30,7 +30,6 @@ pub struct AppState {
     pub should_quit: bool,
     pub dirty: bool,
     pub modal: Option<Modal>,
-    pub unmerged_count: usize,
     pub status_msg: Option<String>,
     pub shallow: bool,
     pub sort_col: SortCol,
@@ -61,10 +60,6 @@ pub enum Modal {
     Author {
         items: Vec<(i64, String, String)>,
         selected: HashSet<i64>,
-        cursor: usize,
-    },
-    AliasMerge {
-        pairs: Vec<(i64, i64)>,
         cursor: usize,
     },
     Help,
@@ -113,14 +108,23 @@ pub fn run(
         .and_then(|s| BucketSize::parse(&s.to_lowercase()))
         .unwrap_or(BucketSize::Week);
 
+    let lens = cfg.default_lens();
+    // Config might name a group that's illegal for the chosen lens (e.g.
+    // Author under Structure). Snap to first valid.
+    let default_group = cfg.default_group();
+    let group_by = if lens.valid_groups().contains(&default_group) {
+        default_group
+    } else {
+        lens.valid_groups()[0]
+    };
+
     let filters = Filters {
         bucket: applied_bucket,
         view: cfg.default_view(),
-        group_by: cfg.default_group(),
+        lens,
+        group_by,
         ..Filters::default()
     };
-
-    let unmerged_count = query::unmerged_candidates(&cache.conn)?.len();
 
     let shallow = repo.is_shallow();
 
@@ -135,7 +139,6 @@ pub fn run(
         should_quit: false,
         dirty: true,
         modal: None,
-        unmerged_count,
         status_msg: None,
         shallow,
         sort_col: SortCol::Total,
@@ -307,7 +310,6 @@ fn do_reindex<B: ratatui::backend::Backend>(
     terminal.clear()?;
 
     res?;
-    state.unmerged_count = query::unmerged_candidates(&state.cache.conn)?.len();
     set_status(state, "reindex complete");
     state.dirty = true;
     Ok(())
@@ -362,11 +364,13 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Char('q') => state.should_quit = true,
         KeyCode::Tab => {
-            state.filters.group_by = match state.filters.group_by {
-                GroupBy::Language => GroupBy::Author,
-                GroupBy::Author => GroupBy::Module,
-                GroupBy::Module => GroupBy::Language,
-            };
+            // Cycle group_by within the current lens's valid set only.
+            let valid = state.filters.lens.valid_groups();
+            let cur_idx = valid
+                .iter()
+                .position(|g| *g == state.filters.group_by)
+                .unwrap_or(0);
+            state.filters.group_by = valid[(cur_idx + 1) % valid.len()];
             state.selected_row = 0;
             state.dirty = true;
         }
@@ -377,11 +381,21 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             };
             state.dirty = true;
         }
-        KeyCode::Char('M') => {
-            state.filters.metric = match state.filters.metric {
-                crate::query::Metric::Loc => crate::query::Metric::Churn,
-                crate::query::Metric::Churn => crate::query::Metric::Loc,
+        KeyCode::Char('L') => {
+            // Cycle lens; snap group_by to first valid when current is illegal.
+            state.filters.lens = match state.filters.lens {
+                Lens::Structure => Lens::Activity,
+                Lens::Activity => Lens::Ownership,
+                Lens::Ownership => Lens::Structure,
             };
+            let valid = state.filters.lens.valid_groups();
+            if !valid.contains(&state.filters.group_by) {
+                state.filters.group_by = valid[0];
+            }
+            if state.filters.lens == Lens::Ownership {
+                set_status(state, "ownership lens: blame cache pending (Slice 5)");
+            }
+            state.selected_row = 0;
             state.dirty = true;
         }
         KeyCode::Down => {
@@ -418,14 +432,6 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 selected,
                 cursor: 0,
             });
-        }
-        KeyCode::Char('m') => {
-            let pairs = query::unmerged_candidates(&state.cache.conn)?;
-            if !pairs.is_empty() {
-                state.modal = Some(Modal::AliasMerge { pairs, cursor: 0 });
-            } else {
-                set_status(state, "no unmerged identity candidates");
-            }
         }
         KeyCode::Char('r') => {
             // Deferred: event_loop leaves alt-screen, runs splash, re-enters.
@@ -543,28 +549,6 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 state.modal = None;
                 state.selected_row = 0;
                 state.dirty = true;
-            }
-            _ => {}
-        },
-        Modal::AliasMerge { pairs, cursor } => match code {
-            KeyCode::Down => *cursor = (*cursor + 1).min(pairs.len().saturating_sub(1)),
-            KeyCode::Up => *cursor = cursor.saturating_sub(1),
-            KeyCode::Enter => {
-                let pair = pairs[*cursor];
-                match crate::config::merge_authors(
-                    &state.cfg.aliases_path,
-                    &state.cache.conn,
-                    pair.0,
-                    pair.1,
-                ) {
-                    Ok(_) => {
-                        set_status(state, "aliases updated — press [r] to reindex");
-                        state.modal = None;
-                    }
-                    Err(e) => {
-                        set_status(state, format!("merge failed: {e}"));
-                    }
-                }
             }
             _ => {}
         },

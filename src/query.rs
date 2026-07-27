@@ -18,10 +18,38 @@ pub enum View {
     Delta,
 }
 
+/// Three orthogonal questions the tool answers, exposed as top-level modes.
+/// Replaces the old (Metric × GroupBy) matrix which had illegal cells
+/// (e.g. "LOC by Author" quietly swapped to net-churn behind the user's back).
+///
+/// - `Structure`: LOC snapshot. "What exists?" — groupable by Language / Module.
+/// - `Activity`:  Churn events.   "What changed?" — groupable by Language / Module / Author.
+/// - `Ownership`: Blame-based.    "Who owns it?"   — groupable by Author only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Metric {
-    Loc,
-    Churn,
+pub enum Lens {
+    Structure,
+    Activity,
+    Ownership,
+}
+
+impl Lens {
+    pub fn label(self) -> &'static str {
+        match self {
+            Lens::Structure => "structure",
+            Lens::Activity => "activity",
+            Lens::Ownership => "ownership",
+        }
+    }
+
+    /// Groupings this lens supports. Cycling Tab walks this list; changing
+    /// lens snaps `group_by` to the first entry if the current one isn't valid.
+    pub fn valid_groups(self) -> &'static [GroupBy] {
+        match self {
+            Lens::Structure => &[GroupBy::Language, GroupBy::Module],
+            Lens::Activity => &[GroupBy::Language, GroupBy::Module, GroupBy::Author],
+            Lens::Ownership => &[GroupBy::Author],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +63,7 @@ pub struct Filters {
     pub bucket: BucketSize,
     pub group_by: GroupBy,
     pub view: View,
-    pub metric: Metric,
+    pub lens: Lens,
 }
 
 impl Default for Filters {
@@ -50,7 +78,7 @@ impl Default for Filters {
             bucket: BucketSize::Week,
             group_by: GroupBy::Language,
             view: View::Cumulative,
-            metric: Metric::Loc,
+            lens: Lens::Structure,
         }
     }
 }
@@ -72,16 +100,27 @@ pub struct BreakdownRow {
 // ─── series ──────────────────────────────────────────────────────────────
 
 pub fn series(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoint>> {
-    let raw = match (f.metric, f.group_by) {
-        // LOC snapshot aggregations
-        (Metric::Loc, GroupBy::Language) => loc_series_by_language(conn, f)?,
-        (Metric::Loc, GroupBy::Module) => loc_series_by_module(conn, f)?,
-        // LOC by author is churn-based (last-touch per-bucket too expensive for v1)
-        (Metric::Loc, GroupBy::Author) => cumulative_net_churn_by_author(conn, f)?,
-        // Churn (delta by default; cumulative view applies running sum below)
-        (Metric::Churn, GroupBy::Language) => churn_series_by_language(conn, f)?,
-        (Metric::Churn, GroupBy::Author) => churn_series_by_author(conn, f)?,
-        (Metric::Churn, GroupBy::Module) => churn_series_by_module(conn, f)?,
+    // Illegal (lens, group) combos are rejected at the UI level (Tab cycles
+    // within `Lens::valid_groups`), but harden here too — a config file could
+    // ship a stale default and we shouldn't panic on it.
+    if !f.lens.valid_groups().contains(&f.group_by) {
+        return Ok(vec![]);
+    }
+
+    let raw = match (f.lens, f.group_by) {
+        (Lens::Structure, GroupBy::Language) => loc_series_by_language(conn, f)?,
+        (Lens::Structure, GroupBy::Module) => loc_series_by_module(conn, f)?,
+
+        (Lens::Activity, GroupBy::Language) => churn_series_by_language(conn, f)?,
+        (Lens::Activity, GroupBy::Module) => churn_series_by_module(conn, f)?,
+        (Lens::Activity, GroupBy::Author) => churn_series_by_author(conn, f)?,
+
+        // Ownership lens is blame-backed and pending Slice 5 (blame cache).
+        // Return empty; the chart panel already handles "no data" gracefully.
+        (Lens::Ownership, _) => vec![],
+
+        // Guard branches — technically unreachable given the guard above.
+        (Lens::Structure, GroupBy::Author) => vec![],
     };
 
     Ok(apply_view(raw, f))
@@ -153,50 +192,6 @@ fn loc_series_by_module(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoin
             value,
         })
         .collect())
-}
-
-fn cumulative_net_churn_by_author(
-    conn: &Connection,
-    f: &Filters,
-) -> Result<Vec<SeriesPoint>> {
-    // Group churn by (bucket, author) → net = added - deleted, running sum in Rust.
-    let (date_where, date_params) = date_where_clause(f);
-    let scope_like = scope_like(&f.path_scope);
-    let (auth_where, auth_params) = in_clause_ints(&f.author_ids, "c.author_id");
-
-    let sql = format!(
-        "SELECT c.bucket_key, c.author_id,
-                SUM(ch.added) - SUM(ch.deleted)
-         FROM churn ch
-         JOIN commits c ON c.sha = ch.sha
-         WHERE 1=1
-           {date_where}
-           AND ch.path LIKE ?
-           {auth_where}
-         GROUP BY c.bucket_key, c.author_id
-         ORDER BY c.bucket_key"
-    );
-
-    let mut params: Vec<Box<dyn ToSql>> = date_params;
-    params.push(Box::new(scope_like));
-    params.extend(auth_params);
-
-    let names = author_names(conn)?;
-    let raw = fetch_series_with_int_group(conn, &sql, &params, &names)?;
-
-    // Running sum per author, walking buckets in order.
-    let mut running: HashMap<String, i64> = HashMap::new();
-    let mut out = Vec::with_capacity(raw.len());
-    for p in raw {
-        let acc = running.entry(p.group.clone()).or_insert(0);
-        *acc += p.value;
-        out.push(SeriesPoint {
-            bucket: p.bucket,
-            group: p.group,
-            value: *acc,
-        });
-    }
-    Ok(out)
 }
 
 fn churn_series_by_language(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoint>> {
@@ -427,36 +422,6 @@ pub fn list_authors(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Heuristic candidate pairs for author merging.
-///
-/// Flags two distinct canonical identities if they share:
-///   - the same email local-part (before `@`), or
-///   - the same lowercased full name.
-pub fn unmerged_candidates(conn: &Connection) -> Result<Vec<(i64, i64)>> {
-    let authors = list_authors(conn)?;
-    // O(N²) — cheap for typical repos but pathological on 10k+ identity sets.
-    // Skip the check rather than freeze the UI; the merge modal simply shows
-    // nothing and users can still run their own aliases.toml edits.
-    if authors.len() > 10_000 {
-        return Ok(vec![]);
-    }
-    let mut pairs = Vec::new();
-    for i in 0..authors.len() {
-        for j in (i + 1)..authors.len() {
-            let (id_a, name_a, email_a) = &authors[i];
-            let (id_b, name_b, email_b) = &authors[j];
-            let local_a = email_a.split('@').next().unwrap_or("");
-            let local_b = email_b.split('@').next().unwrap_or("");
-            let same_local = !local_a.is_empty() && local_a.eq_ignore_ascii_case(local_b);
-            let same_name = name_a.eq_ignore_ascii_case(name_b);
-            if same_local || same_name {
-                pairs.push((*id_a, *id_b));
-            }
-        }
-    }
-    Ok(pairs)
-}
-
 #[allow(dead_code)] // reserved for v1.1 path-picker modal
 pub fn subpaths(conn: &Connection, scope: &str) -> Result<Vec<String>> {
     let scope_norm = normalize_scope(scope);
@@ -622,40 +587,59 @@ fn module_key(path: &str, scope: &str, depth: u8) -> String {
 }
 
 fn apply_view(points: Vec<SeriesPoint>, f: &Filters) -> Vec<SeriesPoint> {
-    match f.view {
-        View::Cumulative => points,
-        View::Delta => {
-            // For Churn: already delta-per-bucket, return as-is.
-            if f.metric == Metric::Churn {
-                return points;
-            }
-            // For LOC snapshots: dense-fill missing (group, bucket) pairs with
-            // 0 before subtracting, so a group that vanishes and reappears
-            // registers a correct negative delta at the gap rather than
-            // silently carrying the last-seen value forward.
-            let mut buckets: std::collections::BTreeSet<i64> =
-                std::collections::BTreeSet::new();
-            for p in &points {
-                buckets.insert(p.bucket);
-            }
-            let mut nested: HashMap<String, HashMap<i64, i64>> = HashMap::new();
-            for p in points {
-                nested.entry(p.group).or_default().insert(p.bucket, p.value);
-            }
-            let mut out = Vec::with_capacity(nested.len() * buckets.len());
-            for (group, per_bucket) in &nested {
-                let mut prev = 0i64;
-                for &b in &buckets {
-                    let v = per_bucket.get(&b).copied().unwrap_or(0);
-                    out.push(SeriesPoint {
-                        bucket: b,
-                        group: group.clone(),
-                        value: v - prev,
-                    });
-                    prev = v;
-                }
-            }
-            out
+    // Semantics per lens:
+    //   Structure  Cumulative → raw snapshot (already correct)
+    //              Delta      → snapshot[t] - snapshot[t-1] (dense-fill gaps)
+    //   Activity   Delta      → per-bucket churn (native from query)
+    //              Cumulative → running sum of churn up to bucket
+    //   Ownership  either     → raw (blame cache TBD, currently empty)
+    match (f.lens, f.view) {
+        (Lens::Structure, View::Cumulative) => points,
+        (Lens::Structure, View::Delta) => dense_fill_then_subtract(points),
+        (Lens::Activity, View::Delta) => points,
+        (Lens::Activity, View::Cumulative) => running_sum_per_group(points),
+        (Lens::Ownership, _) => points,
+    }
+}
+
+/// Dense-fill missing (group, bucket) pairs with 0 before subtracting the
+/// prior bucket's value. A group that vanishes and reappears registers a
+/// correct negative-then-positive swing at the gap instead of silently
+/// carrying its last-seen value forward.
+fn dense_fill_then_subtract(points: Vec<SeriesPoint>) -> Vec<SeriesPoint> {
+    let mut buckets: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for p in &points {
+        buckets.insert(p.bucket);
+    }
+    let mut nested: HashMap<String, HashMap<i64, i64>> = HashMap::new();
+    for p in points {
+        nested.entry(p.group).or_default().insert(p.bucket, p.value);
+    }
+    let mut out = Vec::with_capacity(nested.len() * buckets.len());
+    for (group, per_bucket) in &nested {
+        let mut prev = 0i64;
+        for &b in &buckets {
+            let v = per_bucket.get(&b).copied().unwrap_or(0);
+            out.push(SeriesPoint {
+                bucket: b,
+                group: group.clone(),
+                value: v - prev,
+            });
+            prev = v;
         }
     }
+    out
+}
+
+/// Running sum per group over ascending buckets. Churn rows come out of SQL
+/// as per-bucket deltas; cumulative view is derived here.
+fn running_sum_per_group(mut points: Vec<SeriesPoint>) -> Vec<SeriesPoint> {
+    points.sort_by(|a, b| a.group.cmp(&b.group).then(a.bucket.cmp(&b.bucket)));
+    let mut running: HashMap<String, i64> = HashMap::new();
+    for p in points.iter_mut() {
+        let acc = running.entry(p.group.clone()).or_insert(0);
+        *acc += p.value;
+        p.value = *acc;
+    }
+    points
 }
