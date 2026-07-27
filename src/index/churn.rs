@@ -1,4 +1,6 @@
-use std::process::Command;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -11,39 +13,52 @@ pub struct FileChurn {
     pub deleted: u32,
 }
 
-/// Per-path adds/dels for one commit vs its first parent.
+/// Streamed per-commit adds/dels for the entire history in one subprocess.
 ///
-/// Shells out to `git show --numstat` — simpler and much faster than
-/// wrestling gix's diff API for v1. Handles the root commit (git diffs
-/// against empty tree).
-pub fn for_commit(repo: &Repo, sha: &str) -> Result<Vec<FileChurn>> {
-    let output = Command::new("git")
+/// Replaces 1 `git show` per commit (fork+exec dominated the wall time on
+/// large repos like nvim). Format: `--format='C %H'` puts a marker line
+/// before each commit's numstat block; we accumulate rows into the current
+/// sha and flush on the next marker.
+pub fn batch_all(repo: &Repo) -> Result<HashMap<String, Vec<FileChurn>>> {
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(&repo.root)
         .args([
-            "show",
+            "log",
+            "--no-merges",
             "--no-renames",
             "--first-parent",
-            "--format=",
+            "--format=C %H",
             "--numstat",
-            sha,
+            "HEAD",
         ])
-        .output()
-        .context("running git show --numstat")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning git log --numstat")?;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "git show failed for {sha}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let stdout = child.stdout.take().expect("piped");
+    let reader = BufReader::new(stdout);
 
-    let mut out = Vec::new();
-    for line in output.stdout.split(|&b| b == b'\n') {
+    let mut out: HashMap<String, Vec<FileChurn>> = HashMap::new();
+    let mut current: Option<String> = None;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if let Some(sha) = line.strip_prefix("C ") {
+            current = Some(sha.trim().to_string());
+            continue;
+        }
         if line.is_empty() {
             continue;
         }
-        let line = String::from_utf8_lossy(line);
+        let sha = match &current {
+            Some(s) => s,
+            None => continue,
+        };
         let mut parts = line.splitn(3, '\t');
         let added_s = parts.next().unwrap_or("");
         let deleted_s = parts.next().unwrap_or("");
@@ -52,17 +67,21 @@ pub fn for_commit(repo: &Repo, sha: &str) -> Result<Vec<FileChurn>> {
             None => continue,
         };
         // Binary files show up as "-\t-\tpath"; skip.
-        let added = added_s.parse::<u32>().unwrap_or(0);
-        let deleted = deleted_s.parse::<u32>().unwrap_or(0);
         if added_s == "-" && deleted_s == "-" {
             continue;
         }
-        out.push(FileChurn {
+        let added = added_s.parse::<u32>().unwrap_or(0);
+        let deleted = deleted_s.parse::<u32>().unwrap_or(0);
+        out.entry(sha.clone()).or_default().push(FileChurn {
             path,
             added,
             deleted,
         });
     }
 
+    let status = child.wait().context("waiting for git log")?;
+    if !status.success() {
+        anyhow::bail!("git log exited {status}");
+    }
     Ok(out)
 }

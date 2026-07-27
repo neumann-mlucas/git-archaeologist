@@ -68,6 +68,13 @@ pub fn run(
     let cfg = crate::config::load().context("loading user config for aliases")?;
     let mut resolver = AuthorResolver::new(repo, &cfg.aliases);
 
+    // Batch-fetch all churn in one git log invocation (one fork/exec vs N).
+    // Filtered down to commits we still need to write.
+    let churn_map = churn::batch_all(repo).unwrap_or_default();
+
+    // Blob-parse memoization across sampled commits.
+    let mut blob_cache = tokei_run::BlobCache::default();
+
     // One big transaction — SQLite is much faster this way.
     let tx = cache.conn.transaction()?;
 
@@ -94,19 +101,18 @@ pub fn run(
             ],
         )?;
 
-        // Churn: always per-commit, full-resolution.
-        if let Ok(churn_rows) = churn::for_commit(repo, &commit.sha) {
+        if let Some(rows) = churn_map.get(&commit.sha) {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO churn(sha, path, added, deleted) VALUES(?1,?2,?3,?4)",
             )?;
-            for c in churn_rows {
+            for c in rows {
                 stmt.execute(params![commit.sha, c.path, c.added, c.deleted])?;
             }
         }
 
         // File stats: only on sampled commits.
         if plan.is_sampled {
-            if let Ok(files) = tokei_run::snapshot(repo, &commit.sha) {
+            if let Ok(files) = tokei_run::snapshot(repo, &commit.sha, &mut blob_cache) {
                 let mut stmt = tx.prepare_cached(
                     "INSERT OR REPLACE INTO file_stats(sha, path, language, code, comments, blanks)
                      VALUES(?1,?2,?3,?4,?5,?6)",
@@ -124,11 +130,13 @@ pub fn run(
             }
         }
 
+        // Throttle: 35k channel sends dominate over the actual index work on
+        // fast repos. One update per ~64 commits (and one for the final one).
         if let Some(sender) = &progress {
-            let _ = sender.send(Progress::Commit {
-                done: i + 1,
-                total,
-            });
+            let done = i + 1;
+            if done == total || done & 0x3F == 0 {
+                let _ = sender.send(Progress::Commit { done, total });
+            }
         }
     }
 

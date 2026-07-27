@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const CURRENT_VERSION: i64 = 1;
+const CURRENT_VERSION: i64 = 2;
 
 const V1: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS churn (
 CREATE INDEX IF NOT EXISTS idx_churn_path ON churn(path);
 "#;
 
+const V2: &str = r#"
+-- Author-filtered queries scan commits.author_id — index it.
+CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author_id);
+"#;
+
 pub fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -64,6 +69,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
     if version < 1 {
         conn.execute_batch(V1)?;
+    }
+    if version < 2 {
+        conn.execute_batch(V2)?;
     }
 
     conn.pragma_update(None, "user_version", CURRENT_VERSION)?;
