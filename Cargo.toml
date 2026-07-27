@@ -22,10 +22,28 @@ gix = { version = "0.66", default-features = false, features = [
 ] }
 
 # Language parsing — tree-sitter grammars. Each grammar is a C blob compiled
-# at build time; first build adds a few minutes. Rust is Step A of Slice 4;
-# additional languages come in Step C.
+# at build time; first build adds a few minutes. Long tail added in Slice 4
+# Step C.
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-bash = "0.25"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-md = "0.5"
+tree-sitter-scala = "0.26"
+tree-sitter-haskell = "0.23"
+tree-sitter-zig = "1"
 
 # Cache — OLAP columnar embedded engine. `bundled` compiles libduckdb from
 # source via cc-rs (no cmake needed). First build is slow (5-15 min) but

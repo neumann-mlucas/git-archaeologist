@@ -34,8 +34,8 @@ struct CachedParse {
 const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
 /// Language registry — hooks a `tree_sitter::Language` and the node kinds
-/// that count as comments, keyed by file extension. Step A ships Rust only;
-/// Step C adds the long tail (python, ts, go, c, cpp, java, …).
+/// that count as comments, keyed by file extension.
+#[derive(Clone)]
 struct LangSpec {
     /// Display label written to the DB. Matches gross tokei labels where
     /// possible so downstream palette hashing stays roughly stable.
@@ -52,19 +52,179 @@ pub struct LangRegistry {
 
 impl LangRegistry {
     pub fn new() -> Self {
-        let mut by_ext = HashMap::new();
-        let rust_lang: Language = tree_sitter_rust::LANGUAGE.into();
-        by_ext.insert(
-            "rs",
+        let mut m = HashMap::new();
+
+        // Helper: attach `spec` to every extension in `exts`.
+        let mut add = |exts: &[&'static str], spec: LangSpec| {
+            for e in exts {
+                m.insert(*e, spec.clone());
+            }
+        };
+
+        // C-family and friends unify comments under a single `comment` kind.
+        add(
+            &["rs"],
             LangSpec {
                 label: "Rust",
-                language: rust_lang.clone(),
+                language: tree_sitter_rust::LANGUAGE.into(),
                 comment_kinds: &["line_comment", "block_comment"],
+            },
+        );
+        add(
+            &["py"],
+            LangSpec {
+                label: "Python",
+                language: tree_sitter_python::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["js", "mjs", "cjs", "jsx"],
+            LangSpec {
+                label: "JavaScript",
+                language: tree_sitter_javascript::LANGUAGE.into(),
+                comment_kinds: &["comment", "html_comment"],
+            },
+        );
+        add(
+            &["ts"],
+            LangSpec {
+                label: "TypeScript",
+                language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                comment_kinds: &["comment", "html_comment"],
+            },
+        );
+        add(
+            &["tsx"],
+            LangSpec {
+                label: "TSX",
+                language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+                comment_kinds: &["comment", "html_comment"],
+            },
+        );
+        add(
+            &["go"],
+            LangSpec {
+                label: "Go",
+                language: tree_sitter_go::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["c", "h"],
+            LangSpec {
+                label: "C",
+                language: tree_sitter_c::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+            LangSpec {
+                label: "C++",
+                language: tree_sitter_cpp::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["java"],
+            LangSpec {
+                label: "Java",
+                language: tree_sitter_java::LANGUAGE.into(),
+                comment_kinds: &["line_comment", "block_comment"],
+            },
+        );
+        add(
+            &["rb"],
+            LangSpec {
+                label: "Ruby",
+                language: tree_sitter_ruby::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["sh", "bash"],
+            LangSpec {
+                label: "Bash",
+                language: tree_sitter_bash::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["html", "htm"],
+            LangSpec {
+                label: "HTML",
+                language: tree_sitter_html::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["css"],
+            LangSpec {
+                label: "CSS",
+                language: tree_sitter_css::LANGUAGE.into(),
+                comment_kinds: &["comment", "js_comment"],
+            },
+        );
+        add(
+            &["json"],
+            LangSpec {
+                label: "JSON",
+                language: tree_sitter_json::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["yaml", "yml"],
+            LangSpec {
+                label: "YAML",
+                language: tree_sitter_yaml::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["toml"],
+            LangSpec {
+                label: "TOML",
+                language: tree_sitter_toml_ng::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+            },
+        );
+        add(
+            &["md", "markdown"],
+            LangSpec {
+                label: "Markdown",
+                language: tree_sitter_md::LANGUAGE.into(),
+                comment_kinds: &[],
+            },
+        );
+        add(
+            &["scala", "sc"],
+            LangSpec {
+                label: "Scala",
+                language: tree_sitter_scala::LANGUAGE.into(),
+                comment_kinds: &["comment", "block_comment"],
+            },
+        );
+        add(
+            &["hs"],
+            LangSpec {
+                label: "Haskell",
+                language: tree_sitter_haskell::LANGUAGE.into(),
+                comment_kinds: &["comment", "haddock"],
+            },
+        );
+        add(
+            &["zig"],
+            LangSpec {
+                label: "Zig",
+                language: tree_sitter_zig::LANGUAGE.into(),
+                comment_kinds: &["comment"],
             },
         );
 
         Self {
-            by_ext,
+            by_ext: m,
             parser: Parser::new(),
         }
     }

@@ -110,8 +110,10 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
             match tokei exact; comment count includes `///` doc-content
             (tokei bucketizes those into a nested-Markdown sub-count).
       - [x] Step B: tokei deleted from deps + `tokei_run.rs` removed.
-      - [ ] Step C: add grammars for Python, JS, TS, Go, C, C++, Java, and
-            the other ~15 popular languages.
+      - [x] Step C: grammars for Python, JS/JSX, TS/TSX, Go, C, C++, Java,
+            Ruby, Bash, HTML, CSS, JSON, YAML, TOML, Markdown, Scala, Haskell,
+            Zig. Extension → LangSpec map in `LangRegistry::new()`. Parity
+            verified against tokei on Cargo.toml @ HEAD (38/14/12).
       - [ ] Step D: extend `file_stats` schema with `functions` / `types` /
             `imports` / `test_lines`, backed by per-language `.scm` queries.
       - [ ] Step E: `GroupBy::Function` / `GroupBy::NodeKind` in UI.
