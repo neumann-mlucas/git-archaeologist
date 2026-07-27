@@ -1,7 +1,7 @@
 pub mod bucket;
 pub mod churn;
 pub mod mailmap;
-pub mod tokei_run;
+pub mod treesitter;
 pub mod walker;
 
 use std::collections::HashSet;
@@ -73,7 +73,8 @@ pub fn run(
     let churn_map = churn::batch_all(repo).unwrap_or_default();
 
     // Blob-parse memoization across sampled commits.
-    let mut blob_cache = tokei_run::BlobCache::default();
+    let mut blob_cache = treesitter::BlobCache::default();
+    let mut lang_registry = treesitter::LangRegistry::new();
 
     // One big transaction — SQLite is much faster this way.
     let tx = cache.conn.transaction()?;
@@ -123,7 +124,12 @@ pub fn run(
 
         // File stats: only on sampled commits.
         if plan.is_sampled {
-            if let Ok(files) = tokei_run::snapshot(repo, &commit.sha, &mut blob_cache) {
+            if let Ok(files) = treesitter::snapshot(
+                repo,
+                &commit.sha,
+                &mut blob_cache,
+                &mut lang_registry,
+            ) {
                 let mut stmt = tx.prepare_cached(
                     "INSERT INTO file_stats(sha, path, language, code, comments, blanks)
                      VALUES(?, ?, ?, ?, ?, ?)

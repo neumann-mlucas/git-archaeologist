@@ -104,6 +104,18 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
       binary size grows meaningfully; sub-500-commit repos see no query
       speedup vs sqlite (only justified at kernel scale).
 - [ ] **Slice 4** Drop tokei. Semantic LOC via tree-sitter grammars.
+      - [x] Step A: tree-sitter core + Rust grammar. Line-classifier
+            replicates tokei's blank / comment / code semantics with byte-range
+            filtering (trailing `// comment` counts as code). Blanks + code
+            match tokei exact; comment count includes `///` doc-content
+            (tokei bucketizes those into a nested-Markdown sub-count).
+      - [x] Step B: tokei deleted from deps + `tokei_run.rs` removed.
+      - [ ] Step C: add grammars for Python, JS, TS, Go, C, C++, Java, and
+            the other ~15 popular languages.
+      - [ ] Step D: extend `file_stats` schema with `functions` / `types` /
+            `imports` / `test_lines`, backed by per-language `.scm` queries.
+      - [ ] Step E: `GroupBy::Function` / `GroupBy::NodeKind` in UI.
+      - [ ] Step F: test-vector-based parity assertions.
 - [ ] **Slice 5** Real Ownership lens: `git blame --incremental` cache, per-line author.
 - [ ] **Slice 6** UX: command palette (`:`), `/` fuzzy filter in modals, sparkline column
       in Breakdown, interactive x-axis zoom/pan, diff-plot mode (two ranges side-by-side).

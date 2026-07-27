@@ -21,8 +21,11 @@ gix = { version = "0.66", default-features = false, features = [
     "blob-diff",
 ] }
 
-# Language stats
-tokei = { version = "12", default-features = false }
+# Language parsing — tree-sitter grammars. Each grammar is a C blob compiled
+# at build time; first build adds a few minutes. Rust is Step A of Slice 4;
+# additional languages come in Step C.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
 
 # Cache — OLAP columnar embedded engine. `bundled` compiles libduckdb from
 # source via cc-rs (no cmake needed). First build is slow (5-15 min) but
