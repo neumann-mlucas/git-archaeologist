@@ -1,6 +1,8 @@
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use directories::ProjectDirs;
 
 /// Opened, validated repository handle.
 pub struct Repo {
@@ -9,11 +11,19 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// Path to the cache DuckDB file inside `.git/`.
+    /// Path to the cache DuckDB file under the user's XDG data dir.
+    /// Keyed by `<worktree basename>-<hash of canonical worktree path>` so
+    /// multiple clones of the same project at different paths get distinct
+    /// caches, but the same path always resolves back to the same file.
+    ///
+    /// Linux: ~/.local/share/git-archaeologist/caches/<key>/cache.duckdb
+    /// macOS: ~/Library/Application Support/git-archaeologist/caches/…
     pub fn cache_path(&self) -> PathBuf {
-        self.git
-            .path()
-            .join("git-archaeologist")
+        let dirs = ProjectDirs::from("", "", "git-archaeologist")
+            .expect("resolving XDG data dir");
+        dirs.data_dir()
+            .join("caches")
+            .join(cache_key(&self.root))
             .join("cache.duckdb")
     }
 
@@ -29,6 +39,18 @@ impl Repo {
     pub fn is_shallow(&self) -> bool {
         self.git.path().join("shallow").exists()
     }
+}
+
+fn cache_key(root: &Path) -> String {
+    let canonical = root.to_string_lossy();
+    let name = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("repo");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(canonical.as_bytes());
+    let hash = h.finish();
+    format!("{name}-{hash:016x}")
 }
 
 /// Discover the repo at `path`, validate: not bare, not detached HEAD.
