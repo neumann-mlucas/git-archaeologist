@@ -94,7 +94,8 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
 - [x] **Slice 1** Lens reframe: replace `Metric` with `Lens { Structure | Activity | Ownership }`;
       valid group_by set per lens; delete unmerged-heuristic + AliasMerge modal;
       delete cumulative-net-churn-as-author-LOC hack; delete apply_view churn-Delta special-case.
-- [ ] **Slice 2** Kill `git log --numstat` subprocess. Compute churn in-process via `gix` diff.
+- [x] **Slice 2** Kill `git log --numstat` subprocess. Compute churn in-process via `gix` diff.
+      Numstat parity verified against real git for HEAD of this repo.
 - [ ] **Slice 3** Drop SQLite. Store cache as Parquet + query via DuckDB (columnar OLAP fit).
 - [ ] **Slice 4** Drop tokei. Semantic LOC via tree-sitter grammars.
 - [ ] **Slice 5** Real Ownership lens: `git blame --incremental` cache, per-line author.

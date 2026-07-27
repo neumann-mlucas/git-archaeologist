@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use gix::bstr::ByteSlice;
 
 use crate::repo::Repo;
 
@@ -13,80 +12,96 @@ pub struct FileChurn {
     pub deleted: u32,
 }
 
-/// Streamed per-commit adds/dels for the entire history in one subprocess.
+/// Compute per-file adds/dels for every non-merge commit reachable from HEAD.
 ///
-/// Replaces 1 `git show` per commit (fork+exec dominated the wall time on
-/// large repos like nvim). Format: `--format='C %H'` puts a marker line
-/// before each commit's numstat block; we accumulate rows into the current
-/// sha and flush on the next marker.
+/// Runs entirely in-process via `gix` — replaces the previous `git log
+/// --numstat` subprocess. Benefits:
+///   - No dependency on `git` being on `$PATH`.
+///   - No fork/exec overhead per invocation.
+///   - Diff walks the same reachable set as `index::walker`, so churn rows
+///     line up with commit rows deterministically (the subprocess version
+///     was fragile around merge/first-parent semantics).
+///
+/// Rename tracking is deliberately disabled — matching the prior
+/// `--no-renames` flag — so a moved file registers as an add + delete.
+/// Turning it back on lives in the v1.1 backlog.
 pub fn batch_all(repo: &Repo) -> Result<HashMap<String, Vec<FileChurn>>> {
-    // --no-merges matches walker.rs (skip_merges=true) so every commit the
-    // indexer writes has churn rows here. --first-parent was previously set
-    // but the walker uses full rev traversal, so any commit reachable only
-    // through a non-first-parent path got empty churn silently.
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(&repo.root)
-        .args([
-            "log",
-            "--no-merges",
-            "--no-renames",
-            "--format=C %H",
-            "--numstat",
-            "HEAD",
-        ])
-        .stdout(Stdio::piped())
-        // Piped-but-unread stderr will deadlock if git logs enough warnings
-        // to fill its pipe. We don't consume it, so send to /dev/null.
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawning git log --numstat")?;
-
-    let stdout = child.stdout.take().expect("piped");
-    let reader = BufReader::new(stdout);
-
     let mut out: HashMap<String, Vec<FileChurn>> = HashMap::new();
-    let mut current: Option<String> = None;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if let Some(sha) = line.strip_prefix("C ") {
-            current = Some(sha.trim().to_string());
+    // Resource cache backs the line-diff engine — reused across every
+    // change to avoid re-reading blob data + re-checking attributes.
+    let mut cache = repo
+        .git
+        .diff_resource_cache_for_tree_diff()
+        .context("creating blob-diff resource cache")?;
+
+    let head_id = repo.git.head_id().context("resolving HEAD id")?;
+    let walk = repo
+        .git
+        .rev_walk([head_id])
+        .sorting(gix::traverse::commit::simple::Sorting::ByCommitTimeNewestFirst)
+        .all()
+        .context("starting rev walk for churn")?;
+
+    let empty_tree = repo.git.empty_tree();
+
+    for info in walk {
+        let info = info.context("walking commit for churn")?;
+        let commit = info.object().context("loading commit object")?;
+
+        let parents: Vec<_> = commit.parent_ids().collect();
+        // Skip merges to line up with walker::walk(skip_merges=true).
+        if parents.len() > 1 {
             continue;
         }
-        if line.is_empty() {
-            continue;
-        }
-        let sha = match &current {
-            Some(s) => s,
-            None => continue,
-        };
-        let mut parts = line.splitn(3, '\t');
-        let added_s = parts.next().unwrap_or("");
-        let deleted_s = parts.next().unwrap_or("");
-        let path = match parts.next() {
-            Some(p) => p.to_string(),
-            None => continue,
-        };
-        // Binary files show up as "-\t-\tpath"; skip.
-        if added_s == "-" && deleted_s == "-" {
-            continue;
-        }
-        let added = added_s.parse::<u32>().unwrap_or(0);
-        let deleted = deleted_s.parse::<u32>().unwrap_or(0);
-        out.entry(sha.clone()).or_default().push(FileChurn {
-            path,
-            added,
-            deleted,
-        });
+
+        let sha = commit.id().to_string();
+        let tree = commit.tree().context("loading commit tree")?;
+
+        // Root commit: diff against the empty tree so every file counts as
+        // Addition.
+        let parent_tree_obj = parents
+            .first()
+            .and_then(|pid| repo.git.find_commit(*pid).ok())
+            .and_then(|pc| pc.tree().ok());
+        let parent_tree_ref = parent_tree_obj.as_ref().unwrap_or(&empty_tree);
+
+        let mut churn: Vec<FileChurn> = Vec::new();
+        let mut platform = parent_tree_ref
+            .changes()
+            .context("initializing tree-diff platform")?;
+        platform.track_path().track_rewrites(None);
+
+        platform
+            .for_each_to_obtain_tree(
+                &tree,
+                |change| -> Result<
+                    gix::object::tree::diff::Action,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > {
+                    let path = change.location.to_str_lossy().into_owned();
+                    // .diff().line_counts() returns Ok(None) for binary blobs,
+                    // which is the honest zero-churn signal for those paths.
+                    if let Ok(mut blob_platform) = change.diff(&mut cache) {
+                        if let Ok(Some(counts)) = blob_platform.line_counts() {
+                            churn.push(FileChurn {
+                                path,
+                                added: counts.insertions,
+                                deleted: counts.removals,
+                            });
+                        }
+                    }
+                    Ok(gix::object::tree::diff::Action::Continue)
+                },
+            )
+            .context("iterating tree diff")?;
+
+        // The resource cache is unbounded by design; wipe between commits so
+        // long histories don't blow up memory.
+        cache.clear_resource_cache();
+
+        out.insert(sha, churn);
     }
 
-    let status = child.wait().context("waiting for git log")?;
-    if !status.success() {
-        anyhow::bail!("git log exited {status}");
-    }
     Ok(out)
 }
