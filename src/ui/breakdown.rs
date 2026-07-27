@@ -47,7 +47,7 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect) {
     )
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(" Breakdown "))
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     f.render_stateful_widget(table, area, &mut table_state);
 }

@@ -1,4 +1,9 @@
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use tokei::{Config, LanguageType};
+
+use crate::repo::Repo;
 
 #[derive(Debug, Clone)]
 pub struct FileStat {
@@ -9,14 +14,52 @@ pub struct FileStat {
     pub blanks: u32,
 }
 
-/// Run tokei against the tree at `sha`, without checking anything out.
-///
-/// Reads blobs from the git ODB and feeds them to tokei parsers.
-pub fn snapshot(_repo: &crate::repo::Repo, _sha: &str) -> Result<Vec<FileStat>> {
-    // 1. Peel commit → tree
-    // 2. Walk tree entries, recurse into subtrees
-    // 3. For each blob, detect language by filename via `tokei::LanguageType::from_path`
-    // 4. Read blob bytes, call `language_type.parse_from_slice(...)` (or similar)
-    // 5. Collect into FileStat rows
-    todo!("iterate tree blobs, parse each with tokei")
+/// Snapshot LOC per file at `sha` — walks the tree in git object DB, feeds
+/// blobs to tokei parsers. No worktree checkout.
+pub fn snapshot(repo: &Repo, sha: &str) -> Result<Vec<FileStat>> {
+    let oid: gix::ObjectId = sha.parse().context("parsing commit sha")?;
+    let commit = repo
+        .git
+        .find_object(oid)
+        .context("finding commit object")?
+        .try_into_commit()
+        .context("expected commit object")?;
+
+    let tree = commit.tree().context("resolving commit tree")?;
+    let entries = tree
+        .traverse()
+        .breadthfirst
+        .files()
+        .context("walking tree entries")?;
+
+    let cfg = Config::default();
+    let mut out = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        if !entry.mode.is_blob() {
+            continue;
+        }
+        let path_str = entry.filepath.to_string();
+        let lang = match LanguageType::from_path(Path::new(&path_str), &cfg) {
+            Some(l) => l,
+            None => continue,
+        };
+
+        let blob = match repo.git.find_blob(entry.oid) {
+            Ok(b) => b,
+            Err(_) => continue, // missing / unreachable; skip rather than fail
+        };
+
+        let stats = lang.parse_from_slice(&blob.data, &cfg);
+
+        out.push(FileStat {
+            path: path_str,
+            language: format!("{lang:?}"),
+            code: stats.code as u32,
+            comments: stats.comments as u32,
+            blanks: stats.blanks as u32,
+        });
+    }
+
+    Ok(out)
 }
