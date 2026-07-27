@@ -1,0 +1,59 @@
+[package]
+name = "git-archaeologist"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive TUI to explore the evolution of a git repository"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/neumann/git-archaeologist"
+readme = "README.md"
+rust-version = "1.75"
+
+[dependencies]
+# TUI
+ratatui = "0.28"
+crossterm = "0.28"
+
+# Git
+gix = { version = "0.66", default-features = false, features = [
+    "max-performance-safe",
+    "mailmap",
+    "revision",
+    "blob-diff",
+] }
+
+# Language stats
+tokei = { version = "12", default-features = false }
+
+# Cache
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Time
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config + serde
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+
+# Errors
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Concurrency utils
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
