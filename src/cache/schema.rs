@@ -1,14 +1,6 @@
 use anyhow::Result;
 use duckdb::Connection;
 
-const CURRENT_VERSION: i64 = 1;
-
-// DuckDB dialect notes vs the prior sqlite schema:
-//  - No INTEGER PRIMARY KEY autoinc — use IDENTITY.
-//  - FK enforcement is off by default; declarations are informational.
-//  - No PRAGMA journal_mode/synchronous — DuckDB has its own WAL.
-//  - We keep a `schema_version` row in `meta` since DuckDB has no
-//    `user_version` pragma.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -68,11 +60,5 @@ CREATE INDEX IF NOT EXISTS idx_churn_path ON churn(path);
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
-    // Track schema version in meta rather than user_version.
-    conn.execute(
-        "INSERT INTO meta(key, value) VALUES('schema_version', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [CURRENT_VERSION.to_string()],
-    )?;
     Ok(())
 }
