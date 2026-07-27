@@ -42,7 +42,8 @@ pub fn open(path: &Path) -> Result<Repo> {
     let root = git
         .work_dir()
         .context("repo has no working directory")?
-        .to_path_buf();
+        .canonicalize()
+        .context("canonicalizing worktree root")?;
 
     let repo = Repo { git, root };
 

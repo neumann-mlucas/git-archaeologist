@@ -328,6 +328,51 @@ pub fn breakdown(conn: &Connection, f: &Filters) -> Result<Vec<BreakdownRow>> {
 
 // ─── subpaths (drill-down) ───────────────────────────────────────────────
 
+pub fn list_languages(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT language FROM file_stats ORDER BY language")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn list_authors(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, canonical_name, canonical_email FROM authors ORDER BY canonical_name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Heuristic candidate pairs for author merging.
+///
+/// Flags two distinct canonical identities if they share:
+///   - the same email local-part (before `@`), or
+///   - the same lowercased full name.
+pub fn unmerged_candidates(conn: &Connection) -> Result<Vec<(i64, i64)>> {
+    let authors = list_authors(conn)?;
+    let mut pairs = Vec::new();
+    for i in 0..authors.len() {
+        for j in (i + 1)..authors.len() {
+            let (id_a, name_a, email_a) = &authors[i];
+            let (id_b, name_b, email_b) = &authors[j];
+            let local_a = email_a.split('@').next().unwrap_or("");
+            let local_b = email_b.split('@').next().unwrap_or("");
+            let same_local = !local_a.is_empty() && local_a.eq_ignore_ascii_case(local_b);
+            let same_name = name_a.eq_ignore_ascii_case(name_b);
+            if same_local || same_name {
+                pairs.push((*id_a, *id_b));
+            }
+        }
+    }
+    Ok(pairs)
+}
+
 pub fn subpaths(conn: &Connection, scope: &str) -> Result<Vec<String>> {
     let scope_norm = normalize_scope(scope);
     let like = format!("{scope_norm}%");

@@ -49,6 +49,8 @@ pub fn run(
         .bucket_override
         .unwrap_or_else(|| bucket::auto(all_commits.len()));
 
+    queries::set_meta(&cache.conn, "bucket_size", &format!("{size:?}"))?;
+
     // Assign bucket_key to every commit; mark last-per-bucket as sampled.
     let assignments = assign_buckets(&all_commits, size);
 
