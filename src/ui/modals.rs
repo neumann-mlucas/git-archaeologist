@@ -58,7 +58,7 @@ pub fn render(f: &mut Frame, state: &AppState) {
             )
         }
         Modal::AliasMerge { pairs, cursor } => render_alias_merge(f, state, pairs, *cursor),
-        Modal::Help => render_help(f),
+        Modal::Help => render_help(f, state),
     }
 }
 
@@ -165,11 +165,17 @@ fn author_name_map(state: &AppState) -> std::collections::HashMap<i64, String> {
         .collect()
 }
 
-fn render_help(f: &mut Frame) {
-    let area = centered_rect(60, 60, f.area());
+fn render_help(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(65, 75, f.area());
     f.render_widget(Clear, area);
 
-    let text = vec![
+    let stats = crate::query::cache_stats(&state.cache.conn).ok();
+    let cache_bytes = std::fs::metadata(state.repo.cache_path())
+        .ok()
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let mut text = vec![
         Line::from(" Navigation "),
         Line::from("   ↑ ↓          move selection"),
         Line::from("   Enter, →     drill into module (when Group=module)"),
@@ -178,6 +184,8 @@ fn render_help(f: &mut Frame) {
         Line::from(" Views "),
         Line::from("   Tab          cycle Group-by (lang → author → module)"),
         Line::from("   d            toggle cumulative / delta"),
+        Line::from("   M            toggle LOC / churn metric"),
+        Line::from("   s            cycle sort column"),
         Line::from(""),
         Line::from(" Filters "),
         Line::from("   b            bucket size"),
@@ -192,11 +200,34 @@ fn render_help(f: &mut Frame) {
         Line::from(" App "),
         Line::from("   ? / F1       this help"),
         Line::from("   q / Esc      close modal / quit"),
+        Line::from(""),
+        Line::from(" Cache "),
+        Line::from(format!("   file          {}", state.repo.cache_path().display())),
+        Line::from(format!("   size          {}", fmt_bytes(cache_bytes))),
     ];
+    if let Some(s) = stats {
+        text.push(Line::from(format!("   commits       {}", s.commits)));
+        text.push(Line::from(format!("   file_stats    {}", s.file_stats)));
+        text.push(Line::from(format!("   churn rows    {}", s.churn)));
+        text.push(Line::from(format!("   authors       {}", s.authors)));
+    }
 
     let p = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title(" Help "));
     f.render_widget(p, area);
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const K: u64 = 1024;
+    if n >= K * K * K {
+        format!("{:.2} GiB", n as f64 / (K * K * K) as f64)
+    } else if n >= K * K {
+        format!("{:.2} MiB", n as f64 / (K * K) as f64)
+    } else if n >= K {
+        format!("{:.1} KiB", n as f64 / K as f64)
+    } else {
+        format!("{n} B")
+    }
 }
 
 fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {

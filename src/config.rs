@@ -46,10 +46,34 @@ pub struct RawIdentity {
 }
 
 pub struct Loaded {
-    #[allow(dead_code)] // will drive default_view/default_group/palette in v1.1
     pub config: Config,
     pub aliases: Aliases,
     pub aliases_path: PathBuf,
+}
+
+impl Loaded {
+    pub fn palette_kind(&self) -> crate::ui::palette::PaletteKind {
+        crate::ui::palette::PaletteKind::parse(&self.config.palette)
+    }
+
+    pub fn default_view(&self) -> crate::query::View {
+        match self.config.default_view.trim().to_lowercase().as_str() {
+            "delta" => crate::query::View::Delta,
+            _ => crate::query::View::Cumulative,
+        }
+    }
+
+    pub fn default_group(&self) -> crate::query::GroupBy {
+        match self.config.default_group.trim().to_lowercase().as_str() {
+            "author" => crate::query::GroupBy::Author,
+            "module" => crate::query::GroupBy::Module,
+            _ => crate::query::GroupBy::Language,
+        }
+    }
+
+    pub fn default_bucket(&self) -> Option<crate::index::bucket::BucketSize> {
+        crate::index::bucket::BucketSize::parse(&self.config.default_bucket)
+    }
 }
 
 pub fn load() -> Result<Loaded> {

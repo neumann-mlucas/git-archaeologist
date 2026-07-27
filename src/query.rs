@@ -320,6 +320,26 @@ pub fn breakdown(conn: &Connection, f: &Filters) -> Result<Vec<BreakdownRow>> {
 
 // ─── subpaths (drill-down) ───────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CacheStats {
+    pub commits: i64,
+    pub file_stats: i64,
+    pub churn: i64,
+    pub authors: i64,
+}
+
+pub fn cache_stats(conn: &Connection) -> Result<CacheStats> {
+    let count = |sql: &str| -> Result<i64> {
+        Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?)
+    };
+    Ok(CacheStats {
+        commits: count("SELECT COUNT(*) FROM commits")?,
+        file_stats: count("SELECT COUNT(*) FROM file_stats")?,
+        churn: count("SELECT COUNT(*) FROM churn")?,
+        authors: count("SELECT COUNT(*) FROM authors")?,
+    })
+}
+
 pub fn list_languages(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt =
         conn.prepare("SELECT DISTINCT language FROM file_stats ORDER BY language")?;

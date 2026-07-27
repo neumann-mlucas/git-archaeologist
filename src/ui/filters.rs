@@ -1,21 +1,16 @@
 use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::AppState;
 use crate::query::{GroupBy, Metric, View};
+use crate::ui::panel_block;
 
-pub fn render(f: &mut Frame, state: &AppState, area: Rect) {
-    let from = state
-        .filters
-        .from
-        .map(fmt_ts)
-        .unwrap_or_else(|| "begin".into());
-    let to = state
-        .filters
-        .to
-        .map(fmt_ts)
-        .unwrap_or_else(|| "now".into());
+pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
+    let from = state.filters.from.map(fmt_ts).unwrap_or_else(|| "begin".into());
+    let to = state.filters.to.map(fmt_ts).unwrap_or_else(|| "now".into());
 
     let group = match state.filters.group_by {
         GroupBy::Language => "language",
@@ -40,16 +35,34 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect) {
     } else {
         state.filters.author_ids.len().to_string()
     };
+    let bucket = format!("{:?}", state.filters.bucket).to_lowercase();
 
-    let bucket = format!("{:?}", state.filters.bucket);
+    let kv = |k: &str, v: String| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(
+                format!("{k}:"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(v, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+        ]
+    };
 
-    let text = format!(
-        "  From:[{from}]  To:[{to}]  Bucket:[{bucket}]  Metric:[{metric}]  View:[{view}]\n  Group:[{group}]  Depth:[{}]  Lang:[{langs}]  Author:[{authors}]",
-        state.filters.module_depth,
-    );
+    let mut line1: Vec<Span> = vec![Span::raw(" ")];
+    line1.extend(kv("From", from));
+    line1.extend(kv("To", to));
+    line1.extend(kv("Bucket", bucket));
+    line1.extend(kv("Metric", metric.into()));
+    line1.extend(kv("View", view.into()));
 
-    let block = Block::default().borders(Borders::ALL).title(" Filters ");
-    let p = Paragraph::new(text).block(block);
+    let mut line2: Vec<Span> = vec![Span::raw(" ")];
+    line2.extend(kv("Group", group.into()));
+    line2.extend(kv("Depth", state.filters.module_depth.to_string()));
+    line2.extend(kv("Lang", langs));
+    line2.extend(kv("Author", authors));
+
+    let p = Paragraph::new(vec![Line::from(line1), Line::from(line2)])
+        .block(panel_block(" Filters ", focused));
     f.render_widget(p, area);
 }
 

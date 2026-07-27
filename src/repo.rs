@@ -24,6 +24,11 @@ impl Repo {
             None => bail!("detached HEAD"),
         }
     }
+
+    /// True if `.git/shallow` exists — history is truncated.
+    pub fn is_shallow(&self) -> bool {
+        self.git.path().join("shallow").exists()
+    }
 }
 
 /// Discover the repo at `path`, validate: not bare, not detached HEAD.

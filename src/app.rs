@@ -31,6 +31,17 @@ pub struct AppState {
     pub modal: Option<Modal>,
     pub unmerged_count: usize,
     pub status_msg: Option<String>,
+    pub shallow: bool,
+    pub sort_col: SortCol,
+    pub pending_reindex: bool,
+    pub status_msg_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortCol {
+    Total,
+    Delta,
+    Group,
 }
 
 /// One of these is active when `modal.is_some()`.
@@ -76,20 +87,28 @@ pub const DATE_PRESETS: &[(&str, Option<i64>)] = &[
 pub fn run(
     repo: Repo,
     cfg: Loaded,
-    mut cache: Cache,
+    cache: Cache,
     force_reindex: bool,
     bucket_override: Option<String>,
 ) -> Result<()> {
-    let bucket_override = bucket_override.as_deref().and_then(BucketSize::parse);
+    let bucket_override = bucket_override
+        .as_deref()
+        .and_then(BucketSize::parse)
+        .or_else(|| cfg.default_bucket());
 
-    index::run(
-        &repo,
-        &mut cache,
+    let empty_cache = query::cache_stats(&cache.conn)
+        .map(|s| s.commits == 0)
+        .unwrap_or(true);
+    let show_progress = empty_cache || force_reindex;
+
+    let (repo, cache) = run_indexer(
+        repo,
+        cache,
         index::IndexOptions {
             force_full: force_reindex,
             bucket_override,
         },
-        None,
+        show_progress,
     )?;
 
     let applied_bucket = crate::cache::queries::get_meta(&cache.conn, "bucket_size")?
@@ -98,8 +117,12 @@ pub fn run(
 
     let mut filters = Filters::default();
     filters.bucket = applied_bucket;
+    filters.view = cfg.default_view();
+    filters.group_by = cfg.default_group();
 
     let unmerged_count = query::unmerged_candidates(&cache.conn)?.len();
+
+    let shallow = repo.is_shallow();
 
     let mut state = AppState {
         repo,
@@ -114,6 +137,10 @@ pub fn run(
         modal: None,
         unmerged_count,
         status_msg: None,
+        shallow,
+        sort_col: SortCol::Total,
+        pending_reindex: false,
+        status_msg_at: None,
     };
 
     enable_raw_mode()?;
@@ -129,6 +156,89 @@ pub fn run(
     terminal.show_cursor()?;
 
     result
+}
+
+fn run_indexer(
+    repo: Repo,
+    cache: Cache,
+    opts: index::IndexOptions,
+    show_progress: bool,
+) -> Result<(Repo, Cache)> {
+    if !show_progress {
+        let mut cache = cache;
+        index::run(&repo, &mut cache, opts, None)?;
+        return Ok((repo, cache));
+    }
+    let mut cache = cache;
+    run_index_with_splash(&repo, &mut cache, opts, "indexing repo (first run) — this can take a minute…")?;
+    Ok((repo, cache))
+}
+
+/// Run the indexer on the current thread and stream a progress bar on stderr
+/// from a helper thread that owns the receiver. gix::Repository is not Sync,
+/// so we can't share `&Repo` across threads — but the receiver only needs the
+/// mpsc rx end, which is trivially Send.
+fn run_index_with_splash(
+    repo: &Repo,
+    cache: &mut Cache,
+    opts: index::IndexOptions,
+    banner: &str,
+) -> Result<()> {
+    let (tx, rx) = crossbeam_channel::unbounded::<index::Progress>();
+
+    eprintln!("{banner}");
+    let start = std::time::Instant::now();
+
+    let renderer = std::thread::spawn(move || {
+        let mut done = 0usize;
+        let mut total = 0usize;
+        let mut sampled = 0usize;
+        loop {
+            // Block up to 100ms for the next event; if the channel closes,
+            // exit — the indexer has finished (successfully or otherwise).
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(index::Progress::Started { total_commits, sampled: s }) => {
+                    total = total_commits;
+                    sampled = s;
+                }
+                Ok(index::Progress::Commit { done: d, total: t }) => {
+                    done = d;
+                    total = t;
+                }
+                Ok(index::Progress::Finished) => {
+                    done = total;
+                    render_indexer_bar(done, total, sampled, start.elapsed());
+                    break;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+            render_indexer_bar(done, total, sampled, start.elapsed());
+        }
+        eprintln!();
+    });
+
+    let result = index::run(repo, cache, opts, Some(tx));
+    // Dropping tx (moved into index::run and dropped there) closes the channel.
+    let _ = renderer.join();
+    result
+}
+
+fn render_indexer_bar(done: usize, total: usize, sampled: usize, elapsed: std::time::Duration) {
+    let width: usize = 40;
+    let pct = if total > 0 {
+        (done as f64 / total as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let filled = (width as f64 * pct).round() as usize;
+    let bar: String = "█".repeat(filled) + &"░".repeat(width.saturating_sub(filled));
+    let secs = elapsed.as_secs();
+    // \r rewrites the same line; explicit flush via stderr auto-flush per write.
+    eprint!(
+        "\r  [{bar}] {done}/{total}  ({:.1}%)  sampled={sampled}  {secs}s   ",
+        pct * 100.0
+    );
 }
 
 fn event_loop<B: ratatui::backend::Backend>(
@@ -154,22 +264,82 @@ fn event_loop<B: ratatui::backend::Backend>(
                 }
             }
         }
+
+        if state.pending_reindex {
+            state.pending_reindex = false;
+            do_reindex(terminal, state)?;
+        }
+        expire_status_msg(state);
     }
     Ok(())
+}
+
+fn expire_status_msg(state: &mut AppState) {
+    if let Some(t) = state.status_msg_at {
+        if t.elapsed() > std::time::Duration::from_secs(5) {
+            state.status_msg = None;
+            state.status_msg_at = None;
+        }
+    }
+}
+
+fn do_reindex<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    state: &mut AppState,
+) -> Result<()> {
+    // Leave alt-screen so stderr splash renders on the real terminal.
+    disable_raw_mode()?;
+    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+
+    let opts = index::IndexOptions {
+        force_full: true,
+        bucket_override: Some(state.filters.bucket),
+    };
+    let res = run_index_with_splash(&state.repo, &mut state.cache, opts, "reindexing…");
+
+    // Re-enter alt-screen and force a full redraw.
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    res?;
+    state.unmerged_count = query::unmerged_candidates(&state.cache.conn)?.len();
+    set_status(state, "reindex complete");
+    state.dirty = true;
+    Ok(())
+}
+
+fn set_status(state: &mut AppState, msg: impl Into<String>) {
+    state.status_msg = Some(msg.into());
+    state.status_msg_at = Some(std::time::Instant::now());
 }
 
 fn refresh_data(state: &mut AppState) -> Result<()> {
     state.series = query::series(&state.cache.conn, &state.filters)?;
     state.breakdown = query::breakdown(&state.cache.conn, &state.filters)?;
+    // Drop groups with no data — they clutter the table without adding signal.
+    state.breakdown.retain(|r| r.total != 0 || r.delta != 0);
+    apply_sort(&mut state.breakdown, state.sort_col);
     if state.selected_row >= state.breakdown.len() {
         state.selected_row = state.breakdown.len().saturating_sub(1);
     }
     Ok(())
 }
 
+fn apply_sort(rows: &mut [BreakdownRow], col: SortCol) {
+    match col {
+        SortCol::Total => rows.sort_by(|a, b| b.total.cmp(&a.total)),
+        SortCol::Delta => rows.sort_by(|a, b| b.delta.abs().cmp(&a.delta.abs())),
+        SortCol::Group => rows.sort_by(|a, b| a.group.cmp(&b.group)),
+    }
+}
+
 // ─── main-context keys ────────────────────────────────────────────────────
 
 fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
+    // Any user input clears the previous status message so it doesn't linger;
+    // handlers below re-set it if they still need to say something.
+    state.status_msg = None;
     match code {
         KeyCode::Char('q') => state.should_quit = true,
         KeyCode::Tab => {
@@ -185,6 +355,13 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             state.filters.view = match state.filters.view {
                 View::Cumulative => View::Delta,
                 View::Delta => View::Cumulative,
+            };
+            state.dirty = true;
+        }
+        KeyCode::Char('M') => {
+            state.filters.metric = match state.filters.metric {
+                crate::query::Metric::Loc => crate::query::Metric::Churn,
+                crate::query::Metric::Churn => crate::query::Metric::Loc,
             };
             state.dirty = true;
         }
@@ -228,28 +405,24 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             if !pairs.is_empty() {
                 state.modal = Some(Modal::AliasMerge { pairs, cursor: 0 });
             } else {
-                state.status_msg = Some("no unmerged identity candidates".into());
+                set_status(state, "no unmerged identity candidates");
             }
         }
         KeyCode::Char('r') => {
-            let bucket_override = Some(state.filters.bucket);
-            state.status_msg = Some("reindexing…".into());
-            index::run(
-                &state.repo,
-                &mut state.cache,
-                index::IndexOptions {
-                    force_full: true,
-                    bucket_override,
-                },
-                None,
-            )?;
-            state.unmerged_count =
-                query::unmerged_candidates(&state.cache.conn)?.len();
-            state.status_msg = Some("reindex complete".into());
-            state.dirty = true;
+            // Deferred: event_loop leaves alt-screen, runs splash, re-enters.
+            state.pending_reindex = true;
         }
         KeyCode::Char('?') => {
             state.modal = Some(Modal::Help);
+        }
+        KeyCode::Char('s') => {
+            state.sort_col = match state.sort_col {
+                SortCol::Total => SortCol::Delta,
+                SortCol::Delta => SortCol::Group,
+                SortCol::Group => SortCol::Total,
+            };
+            apply_sort(&mut state.breakdown, state.sort_col);
+            state.selected_row = 0;
         }
         _ => {}
     }
@@ -280,9 +453,7 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             KeyCode::Enter => {
                 let (size, _) = BUCKET_CHOICES[*cursor];
                 state.filters.bucket = size;
-                state.status_msg = Some(
-                    "bucket changed — press [r] to reindex if data was sampled at a different granularity".into(),
-                );
+                set_status(state, "bucket changed — press [r] to reindex if sampling granularity differs");
                 state.modal = None;
                 state.dirty = true;
             }
@@ -299,6 +470,7 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 let (_, days) = DATE_PRESETS[*cursor];
                 apply_date_preset(&mut state.filters, days);
                 state.modal = None;
+                state.selected_row = 0;
                 state.dirty = true;
             }
             _ => {}
@@ -324,6 +496,7 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 state.filters.languages = selected.iter().cloned().collect();
                 state.filters.languages.sort();
                 state.modal = None;
+                state.selected_row = 0;
                 state.dirty = true;
             }
             _ => {}
@@ -349,6 +522,7 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 state.filters.author_ids = selected.iter().copied().collect();
                 state.filters.author_ids.sort();
                 state.modal = None;
+                state.selected_row = 0;
                 state.dirty = true;
             }
             _ => {}
@@ -365,12 +539,11 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                     pair.1,
                 ) {
                     Ok(_) => {
-                        state.status_msg =
-                            Some("aliases updated — press [r] to reindex".into());
+                        set_status(state, "aliases updated — press [r] to reindex");
                         state.modal = None;
                     }
                     Err(e) => {
-                        state.status_msg = Some(format!("merge failed: {e}"));
+                        set_status(state, format!("merge failed: {e}"));
                     }
                 }
             }

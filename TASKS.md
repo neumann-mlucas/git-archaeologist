@@ -56,14 +56,21 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
 - [x] Trigger author remap without full reindex (in-place UPDATE of `author_aliases` + `commits`)
 
 ## M7 — Polish + perf
-- [ ] Palette configs (default / colorblind / mono) — plumb `config.toml` `palette` field
-- [ ] Progress modal during first index — consume `Progress` mpsc channel
-- [ ] Cache size + row count in help modal
-- [ ] Shallow-clone detection + warning
+- [x] Palette configs (default / colorblind / mono) — reads `config.toml` `palette`
+- [x] Progress splash during first index — consumes `Progress` mpsc, drawn to stderr before TUI takes over
+- [x] Threaded reindex (`r`) — alt-screen swap + progress splash + Instant-based status msg expiry
+- [x] Cache size + row count in help modal
+- [x] Shallow-clone detection + warning (title-bar badge)
 - [ ] Bench harness on public repo (e.g. Linux subset) — hit 2-min budget
-- [ ] Error surfaces (missing repo, permission errors, corrupt cache → prompt to rebuild)
-- [ ] Sortable breakdown table columns
-- [ ] Legend / group-color key in chart panel
+- [x] Corrupt-cache detection at open — `PRAGMA integrity_check` + wipe-and-rebuild
+- [x] Sortable breakdown table columns (`s` cycles Total → Δ → Group)
+- [x] Legend / group-color key in chart panel (right-side sidebar ≥60 cols)
+- [x] Lazygit-style panel chrome — rounded borders, focus-aware accent, colored titles
+- [x] `M` toggles LOC ↔ churn metric (was UI dead-end)
+- [x] Config-driven `default_view` / `default_group` / `default_bucket`
+- [x] Delta view: use `abs(total)` for share denominator so signs don't invert percentages
+- [x] Time axis: HH:MM when commit-bucket span < 24h
+- [x] Modal-apply flows reset `selected_row`
 
 ## M8 — Release prep
 - [x] `--version`, `--help` (via clap derive)
@@ -80,4 +87,6 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
 - [ ] Churn-by-language series (needs path→language mapping join)
 - [ ] LOC-by-author per-bucket last-touch attribution (replace cumulative-net-churn proxy)
 - [ ] Path-picker modal using `query::subpaths`
-- [ ] Consume `config.toml` defaults (`default_view` / `default_group` / `palette`)
+- [ ] Stacked-area chart (youplot-style) — needs custom widget, ratatui Chart is line-only
+- [ ] Search-within-modal for author + language checklists (`/` filter)
+- [ ] Bench harness on Linux kernel subset — validate 2-min budget
