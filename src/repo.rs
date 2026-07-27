@@ -9,12 +9,12 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// Path to the cache SQLite file inside `.git/`.
+    /// Path to the cache DuckDB file inside `.git/`.
     pub fn cache_path(&self) -> PathBuf {
         self.git
             .path()
             .join("git-archaeologist")
-            .join("cache.sqlite")
+            .join("cache.duckdb")
     }
 
     pub fn branch_name(&self) -> Result<String> {

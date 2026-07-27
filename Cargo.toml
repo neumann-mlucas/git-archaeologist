@@ -6,7 +6,7 @@ description = "Interactive TUI to explore the evolution of a git repository"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/neumann/git-archaeologist"
 readme = "README.md"
-rust-version = "1.75"
+rust-version = "1.85"
 
 [dependencies]
 # TUI
@@ -24,8 +24,10 @@ gix = { version = "0.66", default-features = false, features = [
 # Language stats
 tokei = { version = "12", default-features = false }
 
-# Cache
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Cache — OLAP columnar embedded engine. `bundled` compiles libduckdb from
+# source via cc-rs (no cmake needed). First build is slow (5-15 min) but
+# incremental builds hit sccache.
+duckdb = { version = "1", features = ["bundled"] }
 
 # Time
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }

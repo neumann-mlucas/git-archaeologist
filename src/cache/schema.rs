@@ -1,23 +1,31 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use duckdb::Connection;
 
-const CURRENT_VERSION: i64 = 3;
+const CURRENT_VERSION: i64 = 1;
 
-const V1: &str = r#"
+// DuckDB dialect notes vs the prior sqlite schema:
+//  - No INTEGER PRIMARY KEY autoinc — use IDENTITY.
+//  - FK enforcement is off by default; declarations are informational.
+//  - No PRAGMA journal_mode/synchronous — DuckDB has its own WAL.
+//  - We keep a `schema_version` row in `meta` since DuckDB has no
+//    `user_version` pragma.
+const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
+CREATE SEQUENCE IF NOT EXISTS seq_authors_id START 1;
+
 CREATE TABLE IF NOT EXISTS authors (
-    id              INTEGER PRIMARY KEY,
+    id              BIGINT PRIMARY KEY DEFAULT nextval('seq_authors_id'),
     canonical_name  TEXT NOT NULL,
     canonical_email TEXT NOT NULL,
     UNIQUE(canonical_name, canonical_email)
 );
 
 CREATE TABLE IF NOT EXISTS author_aliases (
-    author_id INTEGER NOT NULL REFERENCES authors(id),
+    author_id BIGINT NOT NULL,
     raw_name  TEXT NOT NULL,
     raw_email TEXT NOT NULL,
     PRIMARY KEY (raw_name, raw_email)
@@ -26,17 +34,18 @@ CREATE TABLE IF NOT EXISTS author_aliases (
 CREATE TABLE IF NOT EXISTS commits (
     sha          TEXT PRIMARY KEY,
     parent_sha   TEXT,
-    author_id    INTEGER NOT NULL REFERENCES authors(id),
-    committed_at INTEGER NOT NULL,
-    is_merge     INTEGER NOT NULL,
-    is_sampled   INTEGER NOT NULL,
-    bucket_key   INTEGER NOT NULL
+    author_id    BIGINT NOT NULL,
+    committed_at BIGINT NOT NULL,
+    is_merge     BOOLEAN NOT NULL,
+    is_sampled   BOOLEAN NOT NULL,
+    bucket_key   BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_commits_ts     ON commits(committed_at);
 CREATE INDEX IF NOT EXISTS idx_commits_bucket ON commits(bucket_key);
+CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author_id);
 
 CREATE TABLE IF NOT EXISTS file_stats (
-    sha      TEXT NOT NULL REFERENCES commits(sha),
+    sha      TEXT NOT NULL,
     path     TEXT NOT NULL,
     language TEXT NOT NULL,
     code     INTEGER NOT NULL,
@@ -48,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_file_stats_lang ON file_stats(language);
 CREATE INDEX IF NOT EXISTS idx_file_stats_path ON file_stats(path);
 
 CREATE TABLE IF NOT EXISTS churn (
-    sha     TEXT NOT NULL REFERENCES commits(sha),
+    sha     TEXT NOT NULL,
     path    TEXT NOT NULL,
     added   INTEGER NOT NULL,
     deleted INTEGER NOT NULL,
@@ -57,38 +66,13 @@ CREATE TABLE IF NOT EXISTS churn (
 CREATE INDEX IF NOT EXISTS idx_churn_path ON churn(path);
 "#;
 
-const V2: &str = r#"
--- Author-filtered queries scan commits.author_id — index it.
-CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author_id);
-"#;
-
-// v3: language values switched from tokei Debug (e.g. "CPlusPlus") to the
-// stable display name ("C++"). Rows written under the old scheme would clash
-// with new inserts, so clear derived data — the next indexer run rebuilds it.
-// commits is cleared too so incremental indexing doesn't skip everything and
-// leave file_stats/churn empty.
-const V3: &str = r#"
-DELETE FROM file_stats;
-DELETE FROM churn;
-DELETE FROM commits;
-DELETE FROM meta WHERE key = 'indexed_head_sha';
-"#;
-
 pub fn migrate(conn: &Connection) -> Result<()> {
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .unwrap_or(0);
-
-    if version < 1 {
-        conn.execute_batch(V1)?;
-    }
-    if version < 2 {
-        conn.execute_batch(V2)?;
-    }
-    if version < 3 {
-        conn.execute_batch(V3)?;
-    }
-
-    conn.pragma_update(None, "user_version", CURRENT_VERSION)?;
+    conn.execute_batch(SCHEMA)?;
+    // Track schema version in meta rather than user_version.
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('schema_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [CURRENT_VERSION.to_string()],
+    )?;
     Ok(())
 }

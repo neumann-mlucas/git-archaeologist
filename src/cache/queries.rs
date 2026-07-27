@@ -1,8 +1,8 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use duckdb::{params, Connection};
 
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
-    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
+    let mut stmt = conn.prepare("SELECT value FROM meta WHERE key = ?")?;
     let val = stmt
         .query_row(params![key], |r| r.get::<_, String>(0))
         .ok();
@@ -11,7 +11,7 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2)
+        "INSERT INTO meta(key, value) VALUES(?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )?;

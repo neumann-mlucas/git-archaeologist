@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, ToSql};
+use duckdb::{Connection, ToSql};
 
 use crate::index::bucket::BucketSize;
 
@@ -135,7 +135,7 @@ fn loc_series_by_language(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPo
         "SELECT c.bucket_key, fs.language, SUM(fs.code)
          FROM file_stats fs
          JOIN commits c ON c.sha = fs.sha
-         WHERE c.is_sampled = 1
+         WHERE c.is_sampled = TRUE
            {date_where}
            AND fs.path LIKE ?
            {lang_where}
@@ -160,7 +160,7 @@ fn loc_series_by_module(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoin
         "SELECT c.bucket_key, fs.path, fs.code
          FROM file_stats fs
          JOIN commits c ON c.sha = fs.sha
-         WHERE c.is_sampled = 1
+         WHERE c.is_sampled = TRUE
            {date_where}
            AND fs.path LIKE ?
            {lang_where}
@@ -255,7 +255,7 @@ fn latest_path_language_map(conn: &Connection) -> Result<HashMap<String, String>
         "SELECT fs.path, fs.language
          FROM file_stats fs
          JOIN commits c ON c.sha = fs.sha
-         WHERE c.is_sampled = 1
+         WHERE c.is_sampled = TRUE
          ORDER BY c.committed_at",
     )?;
     let mut rows = stmt.query([])?;
@@ -405,7 +405,7 @@ pub fn list_languages(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt =
         conn.prepare("SELECT DISTINCT language FROM file_stats ORDER BY language")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    Ok(rows.collect::<duckdb::Result<_>>()?)
 }
 
 pub fn list_authors(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
@@ -419,7 +419,7 @@ pub fn list_authors(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
             r.get::<_, String>(2)?,
         ))
     })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    Ok(rows.collect::<duckdb::Result<_>>()?)
 }
 
 #[allow(dead_code)] // reserved for v1.1 path-picker modal
@@ -429,7 +429,7 @@ pub fn subpaths(conn: &Connection, scope: &str) -> Result<Vec<String>> {
 
     let latest_sha: Option<String> = conn
         .query_row(
-            "SELECT sha FROM commits WHERE is_sampled = 1 ORDER BY committed_at DESC LIMIT 1",
+            "SELECT sha FROM commits WHERE is_sampled = TRUE ORDER BY committed_at DESC LIMIT 1",
             [],
             |r| r.get(0),
         )
@@ -441,7 +441,7 @@ pub fn subpaths(conn: &Connection, scope: &str) -> Result<Vec<String>> {
     };
 
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT path FROM file_stats WHERE sha = ?1 AND path LIKE ?2",
+        "SELECT DISTINCT path FROM file_stats WHERE sha = ? AND path LIKE ?",
     )?;
     let mut rows = stmt.query([&latest_sha as &dyn ToSql, &like as &dyn ToSql])?;
 

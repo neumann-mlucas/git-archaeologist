@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
-use rusqlite::params;
+use duckdb::params;
 
 use crate::cache::{queries, Cache};
 use crate::index::bucket::BucketSize;
@@ -94,24 +94,35 @@ pub fn run(
         let author_id =
             resolver.resolve(&tx, &commit.author_name, &commit.author_email)?;
 
+        // DuckDB has no OR REPLACE; use INSERT ... ON CONFLICT DO UPDATE.
         tx.execute(
-            "INSERT OR REPLACE INTO commits
+            "INSERT INTO commits
              (sha, parent_sha, author_id, committed_at, is_merge, is_sampled, bucket_key)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+             VALUES(?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (sha) DO UPDATE SET
+                parent_sha   = excluded.parent_sha,
+                author_id    = excluded.author_id,
+                committed_at = excluded.committed_at,
+                is_merge     = excluded.is_merge,
+                is_sampled   = excluded.is_sampled,
+                bucket_key   = excluded.bucket_key",
             params![
                 commit.sha,
                 commit.parent_sha,
                 author_id,
                 commit.committed_at.unix_timestamp(),
-                commit.is_merge as i64,
-                plan.is_sampled as i64,
+                commit.is_merge,
+                plan.is_sampled,
                 plan.bucket_key,
             ],
         )?;
 
         if let Some(rows) = churn_map.get(&commit.sha) {
             let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO churn(sha, path, added, deleted) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO churn(sha, path, added, deleted) VALUES(?, ?, ?, ?)
+                 ON CONFLICT (sha, path) DO UPDATE SET
+                    added   = excluded.added,
+                    deleted = excluded.deleted",
             )?;
             for c in rows {
                 stmt.execute(params![commit.sha, c.path, c.added, c.deleted])?;
@@ -122,8 +133,13 @@ pub fn run(
         if plan.is_sampled {
             if let Ok(files) = tokei_run::snapshot(repo, &commit.sha, &mut blob_cache) {
                 let mut stmt = tx.prepare_cached(
-                    "INSERT OR REPLACE INTO file_stats(sha, path, language, code, comments, blanks)
-                     VALUES(?1,?2,?3,?4,?5,?6)",
+                    "INSERT INTO file_stats(sha, path, language, code, comments, blanks)
+                     VALUES(?, ?, ?, ?, ?, ?)
+                     ON CONFLICT (sha, path) DO UPDATE SET
+                        language = excluded.language,
+                        code     = excluded.code,
+                        comments = excluded.comments,
+                        blanks   = excluded.blanks",
                 )?;
                 for f in files {
                     stmt.execute(params![
@@ -171,7 +187,7 @@ fn wipe_data(cache: &Cache) -> Result<()> {
 fn existing_shas(cache: &Cache) -> Result<HashSet<String>> {
     let mut stmt = cache.conn.prepare("SELECT sha FROM commits")?;
     let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
-    Ok(iter.collect::<rusqlite::Result<_>>()?)
+    Ok(iter.collect::<duckdb::Result<_>>()?)
 }
 
 struct BucketAssignment {

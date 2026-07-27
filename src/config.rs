@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use rusqlite::{params, Connection};
+use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,19 +128,19 @@ pub fn merge_authors(
     loser_id: i64,
 ) -> Result<()> {
     let keeper: (String, String) = conn.query_row(
-        "SELECT canonical_name, canonical_email FROM authors WHERE id = ?1",
+        "SELECT canonical_name, canonical_email FROM authors WHERE id = ?",
         params![keeper_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
 
     let loser_raws: Vec<(String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT raw_name, raw_email FROM author_aliases WHERE author_id = ?1",
+            "SELECT raw_name, raw_email FROM author_aliases WHERE author_id = ?",
         )?;
         let rows = stmt.query_map(params![loser_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
-        rows.collect::<rusqlite::Result<_>>()?
+        rows.collect::<duckdb::Result<_>>()?
     };
 
     // Load existing aliases file (or default), append, write back.
@@ -185,14 +185,14 @@ pub fn merge_authors(
 
     // Repoint the DB: remap loser's aliases to keeper and delete the loser row.
     conn.execute(
-        "UPDATE author_aliases SET author_id = ?1 WHERE author_id = ?2",
+        "UPDATE author_aliases SET author_id = ? WHERE author_id = ?",
         params![keeper_id, loser_id],
     )?;
     conn.execute(
-        "UPDATE commits SET author_id = ?1 WHERE author_id = ?2",
+        "UPDATE commits SET author_id = ? WHERE author_id = ?",
         params![keeper_id, loser_id],
     )?;
-    conn.execute("DELETE FROM authors WHERE id = ?1", params![loser_id])?;
+    conn.execute("DELETE FROM authors WHERE id = ?", params![loser_id])?;
 
     Ok(())
 }

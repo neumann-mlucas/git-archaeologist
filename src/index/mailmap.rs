@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use duckdb::{params, Connection};
 use gix::actor::SignatureRef;
-use rusqlite::{params, Connection};
 
 use crate::config::Aliases;
 use crate::repo::Repo;
@@ -50,14 +50,15 @@ impl AuthorResolver {
 
         let (canonical_name, canonical_email) = self.canonicalize(raw_name, raw_email);
 
-        // Upsert canonical author.
+        // Upsert canonical author. DuckDB syntax uses ON CONFLICT DO NOTHING.
         conn.execute(
-            "INSERT OR IGNORE INTO authors(canonical_name, canonical_email) VALUES(?1, ?2)",
+            "INSERT INTO authors(canonical_name, canonical_email) VALUES(?, ?)
+             ON CONFLICT DO NOTHING",
             params![canonical_name, canonical_email],
         )?;
         let id: i64 = conn
             .query_row(
-                "SELECT id FROM authors WHERE canonical_name = ?1 AND canonical_email = ?2",
+                "SELECT id FROM authors WHERE canonical_name = ? AND canonical_email = ?",
                 params![canonical_name, canonical_email],
                 |r| r.get(0),
             )
@@ -65,7 +66,8 @@ impl AuthorResolver {
 
         // Record alias link (raw → id).
         conn.execute(
-            "INSERT OR IGNORE INTO author_aliases(author_id, raw_name, raw_email) VALUES(?1, ?2, ?3)",
+            "INSERT INTO author_aliases(author_id, raw_name, raw_email) VALUES(?, ?, ?)
+             ON CONFLICT DO NOTHING",
             params![id, raw_name, raw_email],
         )?;
 

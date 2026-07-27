@@ -96,7 +96,15 @@ Ordered roughly by dependency. Milestone tags in `[brackets]`.
       delete cumulative-net-churn-as-author-LOC hack; delete apply_view churn-Delta special-case.
 - [x] **Slice 2** Kill `git log --numstat` subprocess. Compute churn in-process via `gix` diff.
       Numstat parity verified against real git for HEAD of this repo.
-- [ ] **Slice 3** Drop SQLite. Store cache as Parquet + query via DuckDB (columnar OLAP fit).
+- [x] **Slice 3** Drop SQLite → DuckDB embedded (bundled, no cmake needed).
+      Native columnar storage; Parquet export is a one-liner (`COPY ... TO 'x.parquet'`).
+      Cache file renamed `cache.duckdb`. All SQL adapted: `INSERT OR REPLACE`
+      → `INSERT ... ON CONFLICT DO UPDATE`, `INSERT OR IGNORE` →
+      `ON CONFLICT DO NOTHING`, `?N` → `?`, `BOOLEAN` for `is_merge` /
+      `is_sampled`, IDENTITY sequence for `authors.id`. MSRV bumped to 1.85.
+      Trade-off: first build ~15 min (compiles libduckdb C++ via cc);
+      binary size grows meaningfully; sub-500-commit repos see no query
+      speedup vs sqlite (won's justified only at kernel scale).
 - [ ] **Slice 4** Drop tokei. Semantic LOC via tree-sitter grammars.
 - [ ] **Slice 5** Real Ownership lens: `git blame --incremental` cache, per-line author.
 - [ ] **Slice 6** UX: command palette (`:`), `/` fuzzy filter in modals, sparkline column
