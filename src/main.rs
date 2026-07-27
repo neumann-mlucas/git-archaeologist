@@ -11,6 +11,8 @@ mod query;
 mod repo;
 mod ui;
 
+use crate::index::bucket::BucketSize;
+
 #[derive(Parser, Debug)]
 #[command(name = "git-archaeologist", version, about)]
 struct Cli {
@@ -22,9 +24,9 @@ struct Cli {
     #[arg(long)]
     reindex: bool,
 
-    /// Override bucket size (auto|commit|day|week|month)
-    #[arg(long)]
-    bucket: Option<String>,
+    /// Override bucket size (commit|day|week|month; omit for auto)
+    #[arg(long, value_enum)]
+    bucket: Option<BucketSize>,
 }
 
 fn main() -> Result<()> {

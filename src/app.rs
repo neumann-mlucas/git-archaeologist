@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::io;
+use std::sync::Once;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -89,12 +90,9 @@ pub fn run(
     cfg: Loaded,
     cache: Cache,
     force_reindex: bool,
-    bucket_override: Option<String>,
+    bucket_override: Option<BucketSize>,
 ) -> Result<()> {
-    let bucket_override = bucket_override
-        .as_deref()
-        .and_then(BucketSize::parse)
-        .or_else(|| cfg.default_bucket());
+    let bucket_override = bucket_override.or_else(|| cfg.default_bucket());
 
     let empty_cache = query::cache_stats(&cache.conn)
         .map(|s| s.commits == 0)
@@ -115,10 +113,12 @@ pub fn run(
         .and_then(|s| BucketSize::parse(&s.to_lowercase()))
         .unwrap_or(BucketSize::Week);
 
-    let mut filters = Filters::default();
-    filters.bucket = applied_bucket;
-    filters.view = cfg.default_view();
-    filters.group_by = cfg.default_group();
+    let filters = Filters {
+        bucket: applied_bucket,
+        view: cfg.default_view(),
+        group_by: cfg.default_group(),
+        ..Filters::default()
+    };
 
     let unmerged_count = query::unmerged_candidates(&cache.conn)?.len();
 
@@ -142,6 +142,10 @@ pub fn run(
         pending_reindex: false,
         status_msg_at: None,
     };
+
+    // Panic hook restores the terminal so an unwrap!/panic! deep in a widget
+    // doesn't leave the user in a wedged raw-mode alt-screen after crash.
+    install_panic_hook();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -328,10 +332,25 @@ fn refresh_data(state: &mut AppState) -> Result<()> {
 
 fn apply_sort(rows: &mut [BreakdownRow], col: SortCol) {
     match col {
-        SortCol::Total => rows.sort_by(|a, b| b.total.cmp(&a.total)),
-        SortCol::Delta => rows.sort_by(|a, b| b.delta.abs().cmp(&a.delta.abs())),
+        SortCol::Total => rows.sort_by_key(|r| std::cmp::Reverse(r.total)),
+        SortCol::Delta => rows.sort_by_key(|r| std::cmp::Reverse(r.delta.abs())),
         SortCol::Group => rows.sort_by(|a, b| a.group.cmp(&b.group)),
     }
+}
+
+static PANIC_HOOK: Once = Once::new();
+
+fn install_panic_hook() {
+    PANIC_HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // Best-effort — either call can legitimately fail (e.g. not in
+            // raw mode yet). Swallow so the original panic surfaces.
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            prev(info);
+        }));
+    });
 }
 
 // ─── main-context keys ────────────────────────────────────────────────────

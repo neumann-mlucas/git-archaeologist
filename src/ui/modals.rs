@@ -31,7 +31,7 @@ pub fn render(f: &mut Frame, state: &AppState) {
         } => checklist(
             f,
             " Language filter — [space] toggle, [c] clear, [Enter] apply ",
-            items.iter().cloned().collect(),
+            items.to_vec(),
             selected.iter().cloned().collect(),
             *cursor,
         ),

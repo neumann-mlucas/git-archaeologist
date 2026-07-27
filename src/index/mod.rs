@@ -35,11 +35,7 @@ pub fn run(
     opts: IndexOptions,
     progress: Option<Sender<Progress>>,
 ) -> Result<()> {
-    if opts.force_full {
-        wipe_data(cache)?;
-    }
-
-    let already: HashSet<String> = existing_shas(cache)?;
+    let prior_bucket = queries::get_meta(&cache.conn, "bucket_size")?;
 
     let all_commits = walker::walk(repo, /* skip_merges */ true)?;
     if all_commits.is_empty() {
@@ -49,8 +45,20 @@ pub fn run(
     let size = opts
         .bucket_override
         .unwrap_or_else(|| bucket::auto(all_commits.len()));
+    let new_bucket_str = format!("{size:?}");
 
-    queries::set_meta(&cache.conn, "bucket_size", &format!("{size:?}"))?;
+    // Bucket scheme change invalidates every previously-written bucket_key.
+    // Mixing schemes would junk the chart, so force a full reindex.
+    let bucket_changed = prior_bucket
+        .as_deref()
+        .is_some_and(|s| s != new_bucket_str);
+    if opts.force_full || bucket_changed {
+        wipe_data(cache)?;
+    }
+
+    let already: HashSet<String> = existing_shas(cache)?;
+
+    queries::set_meta(&cache.conn, "bucket_size", &new_bucket_str)?;
 
     // Assign bucket_key to every commit; mark last-per-bucket as sampled.
     let assignments = assign_buckets(&all_commits, size);

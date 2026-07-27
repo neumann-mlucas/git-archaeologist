@@ -1,6 +1,6 @@
 use time::OffsetDateTime;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum BucketSize {
     Commit,
     Day,
@@ -47,8 +47,10 @@ pub fn bucket_key(ts: OffsetDateTime, size: BucketSize) -> i64 {
                 + (d.day() as i64)
         }
         BucketSize::Week => {
-            let iso = ts.iso_week() as i64;
-            (ts.year() as i64) * 100 + iso
+            // Use ISO year (not calendar year) so keys sort correctly across
+            // Dec/Jan boundaries where the ISO week rolls into the next year.
+            let (iso_year, iso_week, _) = ts.date().to_iso_week_date();
+            (iso_year as i64) * 100 + (iso_week as i64)
         }
         BucketSize::Month => {
             (ts.year() as i64) * 100 + (u8::from(ts.month()) as i64)

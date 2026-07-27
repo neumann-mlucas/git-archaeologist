@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const CURRENT_VERSION: i64 = 2;
+const CURRENT_VERSION: i64 = 3;
 
 const V1: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -62,6 +62,18 @@ const V2: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author_id);
 "#;
 
+// v3: language values switched from tokei Debug (e.g. "CPlusPlus") to the
+// stable display name ("C++"). Rows written under the old scheme would clash
+// with new inserts, so clear derived data — the next indexer run rebuilds it.
+// commits is cleared too so incremental indexing doesn't skip everything and
+// leave file_stats/churn empty.
+const V3: &str = r#"
+DELETE FROM file_stats;
+DELETE FROM churn;
+DELETE FROM commits;
+DELETE FROM meta WHERE key = 'indexed_head_sha';
+"#;
+
 pub fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -72,6 +84,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         conn.execute_batch(V2)?;
+    }
+    if version < 3 {
+        conn.execute_batch(V3)?;
     }
 
     conn.pragma_update(None, "user_version", CURRENT_VERSION)?;

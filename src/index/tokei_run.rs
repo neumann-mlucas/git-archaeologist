@@ -110,7 +110,10 @@ fn parse_blob(
     }
     let stats = lang.parse_from_slice(&blob.data, cfg);
     Some(CachedParse {
-        language: format!("{lang:?}"),
+        // .name() is a stable human-readable label ("Rust", "C++"); Debug
+        // format leaks internal variant names (CPlusPlus) that can shift
+        // across tokei versions.
+        language: lang.name().to_string(),
         code: stats.code as u32,
         comments: stats.comments as u32,
         blanks: stats.blanks as u32,

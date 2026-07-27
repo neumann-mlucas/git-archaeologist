@@ -20,6 +20,10 @@ pub struct FileChurn {
 /// before each commit's numstat block; we accumulate rows into the current
 /// sha and flush on the next marker.
 pub fn batch_all(repo: &Repo) -> Result<HashMap<String, Vec<FileChurn>>> {
+    // --no-merges matches walker.rs (skip_merges=true) so every commit the
+    // indexer writes has churn rows here. --first-parent was previously set
+    // but the walker uses full rev traversal, so any commit reachable only
+    // through a non-first-parent path got empty churn silently.
     let mut child = Command::new("git")
         .arg("-C")
         .arg(&repo.root)
@@ -27,13 +31,14 @@ pub fn batch_all(repo: &Repo) -> Result<HashMap<String, Vec<FileChurn>>> {
             "log",
             "--no-merges",
             "--no-renames",
-            "--first-parent",
             "--format=C %H",
             "--numstat",
             "HEAD",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Piped-but-unread stderr will deadlock if git logs enough warnings
+        // to fill its pipe. We don't consume it, so send to /dev/null.
+        .stderr(Stdio::null())
         .spawn()
         .context("spawning git log --numstat")?;
 

@@ -199,12 +199,78 @@ fn cumulative_net_churn_by_author(
     Ok(out)
 }
 
-fn churn_series_by_language(_conn: &Connection, _f: &Filters) -> Result<Vec<SeriesPoint>> {
-    // Language attribution for churn = language of the file path (via file_stats
-    // at the nearest sampled commit). Approximated in v1 by looking at the latest
-    // file_stats row for each path. Kept as a stub for M3 — series still renders
-    // via the other three combos; enable this in v1.1.
-    Ok(vec![])
+fn churn_series_by_language(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoint>> {
+    // Language attribution for churn = language of the file path via the most
+    // recent file_stats snapshot that contains that path. Build the path→lang
+    // map once, then aggregate churn rows in memory.
+    let path_lang = latest_path_language_map(conn)?;
+
+    let (date_where, date_params) = date_where_clause(f);
+    let scope_like = scope_like(&f.path_scope);
+    let sql = format!(
+        "SELECT c.bucket_key, ch.path,
+                ch.added + ch.deleted
+         FROM churn ch
+         JOIN commits c ON c.sha = ch.sha
+         WHERE 1=1
+           {date_where}
+           AND ch.path LIKE ?
+         ORDER BY c.bucket_key"
+    );
+
+    let mut params: Vec<Box<dyn ToSql>> = date_params;
+    params.push(Box::new(scope_like));
+
+    let stmt_params: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+
+    let lang_filter: std::collections::HashSet<String> = f.languages.iter().cloned().collect();
+    let use_filter = !lang_filter.is_empty();
+
+    let mut agg: BTreeMap<(i64, String), i64> = BTreeMap::new();
+    let mut rows = stmt.query(stmt_params.as_slice())?;
+    while let Some(row) = rows.next()? {
+        let bucket: i64 = row.get(0)?;
+        let path: String = row.get(1)?;
+        let val: i64 = row.get(2)?;
+        let lang = match path_lang.get(&path) {
+            Some(l) => l,
+            None => continue, // path never appeared in a sampled snapshot → unknown language
+        };
+        if use_filter && !lang_filter.contains(lang) {
+            continue;
+        }
+        *agg.entry((bucket, lang.clone())).or_insert(0) += val;
+    }
+
+    Ok(agg
+        .into_iter()
+        .map(|((bucket, group), value)| SeriesPoint {
+            bucket,
+            group,
+            value,
+        })
+        .collect())
+}
+
+fn latest_path_language_map(conn: &Connection) -> Result<HashMap<String, String>> {
+    // Walk sampled snapshots oldest → newest and overwrite; final value per
+    // path is the most recent language classification for that path.
+    let mut stmt = conn.prepare(
+        "SELECT fs.path, fs.language
+         FROM file_stats fs
+         JOIN commits c ON c.sha = fs.sha
+         WHERE c.is_sampled = 1
+         ORDER BY c.committed_at",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut out: HashMap<String, String> = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(0)?;
+        let lang: String = row.get(1)?;
+        out.insert(path, lang);
+    }
+    Ok(out)
 }
 
 fn churn_series_by_author(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoint>> {
@@ -314,7 +380,7 @@ pub fn breakdown(conn: &Connection, f: &Filters) -> Result<Vec<BreakdownRow>> {
         })
         .collect();
 
-    rows.sort_by(|a, b| b.total.cmp(&a.total));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.total));
     Ok(rows)
 }
 
@@ -368,6 +434,12 @@ pub fn list_authors(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
 ///   - the same lowercased full name.
 pub fn unmerged_candidates(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     let authors = list_authors(conn)?;
+    // O(N²) — cheap for typical repos but pathological on 10k+ identity sets.
+    // Skip the check rather than freeze the UI; the merge modal simply shows
+    // nothing and users can still run their own aliases.toml edits.
+    if authors.len() > 10_000 {
+        return Ok(vec![]);
+    }
     let mut pairs = Vec::new();
     for i in 0..authors.len() {
         for j in (i + 1)..authors.len() {
@@ -549,22 +621,41 @@ fn module_key(path: &str, scope: &str, depth: u8) -> String {
     }
 }
 
-fn apply_view(mut points: Vec<SeriesPoint>, f: &Filters) -> Vec<SeriesPoint> {
+fn apply_view(points: Vec<SeriesPoint>, f: &Filters) -> Vec<SeriesPoint> {
     match f.view {
         View::Cumulative => points,
         View::Delta => {
-            // For LOC: subtract previous bucket per group.
             // For Churn: already delta-per-bucket, return as-is.
             if f.metric == Metric::Churn {
                 return points;
             }
-            points.sort_by(|a, b| a.group.cmp(&b.group).then(a.bucket.cmp(&b.bucket)));
-            let mut prev: HashMap<String, i64> = HashMap::new();
-            for p in points.iter_mut() {
-                let last = prev.insert(p.group.clone(), p.value).unwrap_or(0);
-                p.value -= last;
+            // For LOC snapshots: dense-fill missing (group, bucket) pairs with
+            // 0 before subtracting, so a group that vanishes and reappears
+            // registers a correct negative delta at the gap rather than
+            // silently carrying the last-seen value forward.
+            let mut buckets: std::collections::BTreeSet<i64> =
+                std::collections::BTreeSet::new();
+            for p in &points {
+                buckets.insert(p.bucket);
             }
-            points
+            let mut nested: HashMap<String, HashMap<i64, i64>> = HashMap::new();
+            for p in points {
+                nested.entry(p.group).or_default().insert(p.bucket, p.value);
+            }
+            let mut out = Vec::with_capacity(nested.len() * buckets.len());
+            for (group, per_bucket) in &nested {
+                let mut prev = 0i64;
+                for &b in &buckets {
+                    let v = per_bucket.get(&b).copied().unwrap_or(0);
+                    out.push(SeriesPoint {
+                        bucket: b,
+                        group: group.clone(),
+                        value: v - prev,
+                    });
+                    prev = v;
+                }
+            }
+            out
         }
     }
 }
