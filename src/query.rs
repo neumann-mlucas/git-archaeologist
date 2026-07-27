@@ -67,7 +67,6 @@ pub struct BreakdownRow {
     pub group: String,
     pub total: i64,
     pub delta: i64,
-    pub share: f64,
 }
 
 // ─── series ──────────────────────────────────────────────────────────────
@@ -303,20 +302,13 @@ pub fn breakdown(conn: &Connection, f: &Filters) -> Result<Vec<BreakdownRow>> {
         }
     }
 
-    let total_sum: i64 = latest.values().copied().sum();
     let mut rows: Vec<BreakdownRow> = latest
         .into_iter()
         .map(|(group, total)| {
             let prior = earliest.get(&group).copied().unwrap_or(0);
-            let share = if total_sum > 0 {
-                total as f64 / total_sum as f64
-            } else {
-                0.0
-            };
             BreakdownRow {
                 delta: total - prior,
                 total,
-                share,
                 group,
             }
         })
@@ -373,6 +365,7 @@ pub fn unmerged_candidates(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     Ok(pairs)
 }
 
+#[allow(dead_code)] // reserved for v1.1 path-picker modal
 pub fn subpaths(conn: &Connection, scope: &str) -> Result<Vec<String>> {
     let scope_norm = normalize_scope(scope);
     let like = format!("{scope_norm}%");

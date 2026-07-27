@@ -17,6 +17,7 @@ use crate::index::walker::CommitInfo;
 use crate::repo::Repo;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // consumed by M7 progress modal
 pub enum Progress {
     Started { total_commits: usize, sampled: usize },
     Commit { done: usize, total: usize },

@@ -17,11 +17,6 @@ impl Repo {
             .join("cache.sqlite")
     }
 
-    pub fn head_sha(&self) -> Result<String> {
-        let head = self.git.head_commit().context("resolving HEAD")?;
-        Ok(head.id().to_string())
-    }
-
     pub fn branch_name(&self) -> Result<String> {
         let head = self.git.head().context("reading HEAD ref")?;
         match head.referent_name() {

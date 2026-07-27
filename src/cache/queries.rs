@@ -18,10 +18,6 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn indexed_head(conn: &Connection) -> Result<Option<String>> {
-    get_meta(conn, "indexed_head_sha")
-}
-
 pub fn set_indexed_head(conn: &Connection, sha: &str) -> Result<()> {
     set_meta(conn, "indexed_head_sha", sha)
 }

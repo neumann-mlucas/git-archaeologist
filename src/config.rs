@@ -46,6 +46,7 @@ pub struct RawIdentity {
 }
 
 pub struct Loaded {
+    #[allow(dead_code)] // will drive default_view/default_group/palette in v1.1
     pub config: Config,
     pub aliases: Aliases,
     pub aliases_path: PathBuf,
