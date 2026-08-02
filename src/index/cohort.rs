@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use duckdb::params;
+use rayon::prelude::*;
 
 use crate::cache::Cache;
 
@@ -68,20 +69,27 @@ pub fn fold_and_materialize(cache: &mut Cache) -> Result<()> {
     // Incremental is v1.x.
     cache.conn.execute("DELETE FROM line_births", [])?;
 
-    let tx = cache.conn.transaction()?;
+    // Fold each file in parallel. Files are independent — the whole point
+    // of splitting Phase 2 by canonical path (SPEC §Indexing pipeline).
+    let folded: Vec<(String, Vec<(String, i64)>)> = by_path
+        .into_par_iter()
+        .map(|(path, hunks)| (path, fold_file(&hunks)))
+        .collect();
+
+    // Bulk-load via Appender — 800k rows on a ~2.5k-commit repo. Prepared
+    // execute() per row was measurably the slowest step in the fold.
     {
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO line_births(path, line_no, birth_sha, birth_bucket)
-             VALUES(?, ?, ?, ?)",
-        )?;
-        for (path, hunks) in by_path {
-            let state = fold_file(&hunks);
+        let mut app = cache
+            .conn
+            .appender("line_births")
+            .context("line_births appender")?;
+        for (path, state) in &folded {
             for (i, (sha, bucket)) in state.iter().enumerate() {
-                stmt.execute(params![path, (i as i32) + 1, sha, bucket])?;
+                app.append_row(params![path, (i as i32) + 1, sha, bucket])?;
             }
         }
+        app.flush()?;
     }
-    tx.commit()?;
     Ok(())
 }
 

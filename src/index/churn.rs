@@ -7,12 +7,14 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gix::bstr::ByteSlice;
 use gix::diff::Rewrites;
 use imara_diff::intern::InternedInput;
 use imara_diff::{Algorithm, Sink};
+use rayon::prelude::*;
 
 use crate::repo::Repo;
 
@@ -46,9 +48,14 @@ const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
 /// Walk every non-merge commit reachable from HEAD; return per-commit
 /// diff (hunks + churn) keyed by commit sha.
+///
+/// Diff computation is embarrassingly parallel (SPEC §Indexing pipeline,
+/// Phase 1). Each rayon worker opens its own `gix::Repository` handle
+/// via `map_init` — gix::Repository is `!Sync` but re-opening the same
+/// `.git/` from N threads is safe.
 pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
-    let mut out: HashMap<String, CommitDiff> = HashMap::new();
-
+    // Step 1 (serial): collect the (sha, parent_id?) list for every
+    // non-merge commit. Cheap traversal, no blob I/O.
     let head_id = repo.git.head_id().context("resolving HEAD id")?;
     let walk = repo
         .git
@@ -57,55 +64,85 @@ pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
         .all()
         .context("starting rev walk for diff")?;
 
-    let empty_tree = repo.git.empty_tree();
-
+    let mut jobs: Vec<(String, Option<gix::ObjectId>)> = Vec::new();
     for info in walk {
         let info = info.context("walking commit for diff")?;
         let commit = info.object().context("loading commit object")?;
-
         let parents: Vec<_> = commit.parent_ids().collect();
         // Skip merges — line up with walker's non-merge sampling.
         if parents.len() > 1 {
             continue;
         }
-
-        let sha = commit.id().to_string();
-        let tree = commit.tree().context("loading commit tree")?;
-
-        let parent_tree_obj = parents
-            .first()
-            .and_then(|pid| repo.git.find_commit(*pid).ok())
-            .and_then(|pc| pc.tree().ok());
-        let parent_tree_ref = parent_tree_obj.as_ref().unwrap_or(&empty_tree);
-
-        let mut diff = CommitDiff::default();
-        let mut platform = parent_tree_ref
-            .changes()
-            .context("initializing tree-diff platform")?;
-        // Rename detection ON per SPEC §Git info consumed.
-        platform.track_path().track_rewrites(Some(Rewrites::default()));
-
-        platform
-            .for_each_to_obtain_tree(
-                &tree,
-                |change| -> Result<
-                    gix::object::tree::diff::Action,
-                    Box<dyn std::error::Error + Send + Sync>,
-                > {
-                    handle_change(repo, change, &mut diff);
-                    Ok(gix::object::tree::diff::Action::Continue)
-                },
-            )
-            .context("iterating tree diff")?;
-
-        out.insert(sha, diff);
+        jobs.push((
+            commit.id().to_string(),
+            parents.first().map(|p| p.detach()),
+        ));
     }
 
-    Ok(out)
+    // Step 2 (parallel): per-worker gix::Repository does the blob diff.
+    // `.git` path is what gix::open expects. Repo::git.path() returns
+    // exactly that.
+    let git_dir: PathBuf = repo.git.path().to_path_buf();
+
+    let results: Vec<(String, CommitDiff)> = jobs
+        .par_iter()
+        .map_init(
+            || gix::open(&git_dir).expect("open per-worker repo"),
+            |worker_git, (sha, parent_id)| {
+                let diff = diff_one(worker_git, sha, parent_id.as_ref());
+                (sha.clone(), diff)
+            },
+        )
+        .collect();
+
+    Ok(results.into_iter().collect())
+}
+
+/// Compute the (hunks, churn) delta for a single commit against its
+/// first parent. Blob reads reuse the worker-local `gix::Repository`.
+fn diff_one(
+    git: &gix::Repository,
+    sha: &str,
+    parent_id: Option<&gix::ObjectId>,
+) -> CommitDiff {
+    let mut diff = CommitDiff::default();
+
+    let commit = match git.find_commit(gix::ObjectId::from_hex(sha.as_bytes()).unwrap()) {
+        Ok(c) => c,
+        Err(_) => return diff,
+    };
+    let tree = match commit.tree() {
+        Ok(t) => t,
+        Err(_) => return diff,
+    };
+    let empty_tree = git.empty_tree();
+    let parent_tree_obj = parent_id
+        .and_then(|pid| git.find_commit(*pid).ok())
+        .and_then(|pc| pc.tree().ok());
+    let parent_tree_ref = parent_tree_obj.as_ref().unwrap_or(&empty_tree);
+
+    let mut platform = match parent_tree_ref.changes() {
+        Ok(p) => p,
+        Err(_) => return diff,
+    };
+    platform.track_path().track_rewrites(Some(Rewrites::default()));
+
+    let _ = platform.for_each_to_obtain_tree(
+        &tree,
+        |change| -> Result<
+            gix::object::tree::diff::Action,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            handle_change(git, change, &mut diff);
+            Ok(gix::object::tree::diff::Action::Continue)
+        },
+    );
+
+    diff
 }
 
 fn handle_change<'a>(
-    repo: &Repo,
+    git: &gix::Repository,
     change: gix::object::tree::diff::Change<'a, '_, '_>,
     out: &mut CommitDiff,
 ) {
@@ -118,7 +155,7 @@ fn handle_change<'a>(
             if !entry_mode.is_blob() {
                 return;
             }
-            let bytes = match load_text_blob(repo, id.detach()) {
+            let bytes = match load_text_blob(git, id.detach()) {
                 Some(b) => b,
                 None => return,
             };
@@ -143,7 +180,7 @@ fn handle_change<'a>(
             if !entry_mode.is_blob() {
                 return;
             }
-            let bytes = match load_text_blob(repo, id.detach()) {
+            let bytes = match load_text_blob(git, id.detach()) {
                 Some(b) => b,
                 None => return,
             };
@@ -174,8 +211,8 @@ fn handle_change<'a>(
                 return;
             }
             let (old, new) = match (
-                load_text_blob(repo, previous_id.detach()),
-                load_text_blob(repo, id.detach()),
+                load_text_blob(git, previous_id.detach()),
+                load_text_blob(git, id.detach()),
             ) {
                 (Some(o), Some(n)) => (o, n),
                 _ => return,
@@ -210,8 +247,8 @@ fn handle_change<'a>(
             }
             let prev_path = source_location.to_str_lossy().into_owned();
             let (old, new) = match (
-                load_text_blob(repo, source_id.detach()),
-                load_text_blob(repo, id.detach()),
+                load_text_blob(git, source_id.detach()),
+                load_text_blob(git, id.detach()),
             ) {
                 (Some(o), Some(n)) => (o, n),
                 _ => return,
@@ -249,8 +286,8 @@ fn handle_change<'a>(
     }
 }
 
-fn load_text_blob(repo: &Repo, oid: gix::ObjectId) -> Option<Vec<u8>> {
-    let blob = repo.git.find_blob(oid).ok()?;
+fn load_text_blob(git: &gix::Repository, oid: gix::ObjectId) -> Option<Vec<u8>> {
+    let blob = git.find_blob(oid).ok()?;
     if blob.data.len() > MAX_BLOB_BYTES {
         return None;
     }
