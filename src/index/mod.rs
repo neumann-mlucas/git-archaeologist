@@ -97,18 +97,21 @@ pub fn run(
     let mut blob_cache = treesitter::BlobCache::default();
     let mut lang_registry = treesitter::LangRegistry::new();
 
-    // Tx flush cadence. Small enough that hunks from a bulky commit don't
-    // build up in a single transaction and blow past DuckDB's memory
-    // limit; large enough to amortize per-tx overhead.
-    // ponytail: constant, not a knob, until a real repo shows 100 is wrong.
-    const COMMIT_CHUNK: usize = 100;
+    // Flush cadence: how many commits between BEGIN/COMMIT chunk
+    // boundaries + Appender flushes. Trade-off:
+    // - large chunks minimize per-commit sync cost (auto-commit = disk
+    //   round-trip per row), but hold every row in RAM until commit.
+    // - small chunks bound RAM but pay more sync cost.
+    // On ratatui-scale (2.5k commits, ~150 hunks each), 50 keeps peak
+    // RSS < 1 GB while running >5 commits/s. Not a knob.
+    const FLUSH_EVERY: usize = 50;
 
     let mut last_progress_at = std::time::Instant::now();
     let progress_interval = std::time::Duration::from_millis(100);
 
     // Drop secondary indexes on high-write tables during bulk insert;
     // rebuild at the end. DuckDB pays index maintenance in memory per
-    // insert; on a 5k-commit repo the hunks index alone was the OOM
+    // insert; on a mid-size repo the hunks index alone is the memory
     // hotspot. Recreate identically to schema.rs.
     cache.conn.execute_batch(
         "DROP INDEX IF EXISTS idx_hunks_sha_path;
@@ -125,12 +128,37 @@ pub fn run(
          DROP INDEX IF EXISTS idx_line_births_path;",
     )?;
 
-    let mut tx = cache.conn.transaction()?;
-    let mut in_chunk: usize = 0;
-
-    // Tags — insert after commit rows land so the FK holds. Reuse the
-    // list we already walked above for tag-bucket assignment.
+    // Tags — inserted after commits so the FK target is present. Reuse
+    // the list we already walked for tag-bucket assignment.
     let tag_infos = walker::tags(repo).unwrap_or_default();
+
+    // Everything write-heavy goes through Appender. Under `--force-full`
+    // we wiped the tables above; on incremental runs, `already` filters
+    // SHAs whose rows already exist. Either way, no PK/UNIQUE conflicts.
+    // Dropping ON CONFLICT DO UPDATE means we lose the "re-run same SHA
+    // and refresh in place" behavior — but v1 doesn't rely on it: only
+    // path is force_full (wipe) or incremental-append (skip).
+    let mut commits_app = cache.conn.appender("commits").context("commits appender")?;
+    let mut parents_app = cache
+        .conn
+        .appender("commit_parents")
+        .context("commit_parents appender")?;
+    let mut trailers_app = cache
+        .conn
+        .appender("commit_trailers")
+        .context("commit_trailers appender")?;
+    let mut hunks_app = cache.conn.appender("hunks").context("hunks appender")?;
+    let mut churn_app = cache
+        .conn
+        .appender("file_churn")
+        .context("file_churn appender")?;
+    let mut file_stats_app = cache
+        .conn
+        .appender("file_stats")
+        .context("file_stats appender")?;
+    let mut funcs_app = cache.conn.appender("funcs").context("funcs appender")?;
+
+    let mut since_flush: usize = 0;
 
     for (i, (commit, plan)) in all_commits.iter().zip(assignments.iter()).enumerate() {
         if already.contains(&commit.sha) && !opts.force_full {
@@ -138,94 +166,50 @@ pub fn run(
         }
 
         let author_id =
-            resolver.resolve(&tx, &commit.author_name, &commit.author_email)?;
-        let committer_id =
-            resolver.resolve(&tx, &commit.committer_name, &commit.committer_email)?;
-
-        tx.execute(
-            "INSERT INTO commits
-             (sha, author_id, committer_id, authored_at, is_merge, is_sampled,
-              bucket_key, msg_type, is_breaking, is_revert, ignored_blame)
-             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (sha) DO UPDATE SET
-                author_id     = excluded.author_id,
-                committer_id  = excluded.committer_id,
-                authored_at   = excluded.authored_at,
-                is_merge      = excluded.is_merge,
-                is_sampled    = excluded.is_sampled,
-                bucket_key    = excluded.bucket_key,
-                msg_type      = excluded.msg_type,
-                is_breaking   = excluded.is_breaking,
-                is_revert     = excluded.is_revert,
-                ignored_blame = excluded.ignored_blame",
-            params![
-                commit.sha,
-                author_id,
-                committer_id,
-                commit.committed_at.unix_timestamp(),
-                commit.is_merge,
-                plan.is_sampled,
-                plan.bucket_key,
-                commit.conv.msg_type,
-                commit.conv.is_breaking,
-                commit.conv.is_revert,
-                commit.ignored_blame,
-            ],
+            resolver.resolve(&cache.conn, &commit.author_name, &commit.author_email)?;
+        let committer_id = resolver.resolve(
+            &cache.conn,
+            &commit.committer_name,
+            &commit.committer_email,
         )?;
 
-        // Parents.
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO commit_parents(sha, parent_sha, parent_idx)
-                 VALUES(?, ?, ?)
-                 ON CONFLICT (sha, parent_idx) DO UPDATE SET
-                    parent_sha = excluded.parent_sha",
-            )?;
-            for (idx, parent) in commit.parents.iter().enumerate() {
-                stmt.execute(params![commit.sha, parent, idx as i32])?;
-            }
+        commits_app.append_row(params![
+            commit.sha,
+            author_id,
+            committer_id,
+            commit.committed_at.unix_timestamp(),
+            commit.is_merge,
+            plan.is_sampled,
+            plan.bucket_key,
+            commit.conv.msg_type,
+            commit.conv.is_breaking,
+            commit.conv.is_revert,
+            commit.ignored_blame,
+        ])?;
+
+        for (idx, parent) in commit.parents.iter().enumerate() {
+            parents_app.append_row(params![commit.sha, parent, idx as i32])?;
         }
 
-        // Trailers — resolve raw ident → author_id, one row per trailer.
         for tr in &commit.trailers {
-            let tid =
-                resolver.resolve(&tx, &tr.ident.name, &tr.ident.email)?;
-            tx.execute(
-                "INSERT INTO commit_trailers(sha, author_id, role)
-                 VALUES(?, ?, ?)",
-                params![commit.sha, tid, tr.role.as_str()],
-            )?;
+            let tid = resolver.resolve(&cache.conn, &tr.ident.name, &tr.ident.email)?;
+            trailers_app.append_row(params![commit.sha, tid, tr.role.as_str()])?;
         }
 
         if let Some(diff) = churn_map.get(&commit.sha) {
-            {
-                let mut stmt = tx.prepare_cached(
-                    "INSERT INTO file_churn(sha, path, added, deleted) VALUES(?, ?, ?, ?)
-                     ON CONFLICT (sha, path) DO UPDATE SET
-                        added   = excluded.added,
-                        deleted = excluded.deleted",
-                )?;
-                for c in &diff.churn {
-                    stmt.execute(params![commit.sha, c.path, c.added, c.deleted])?;
-                }
+            for c in &diff.churn {
+                churn_app.append_row(params![commit.sha, c.path, c.added, c.deleted])?;
             }
-            {
-                let mut stmt = tx.prepare_cached(
-                    "INSERT INTO hunks
-                       (sha, path, prev_path, old_start, old_len, new_start, new_len)
-                     VALUES(?, ?, ?, ?, ?, ?, ?)",
-                )?;
-                for h in &diff.hunks {
-                    stmt.execute(params![
-                        commit.sha,
-                        h.path,
-                        h.prev_path,
-                        h.old_start,
-                        h.old_len,
-                        h.new_start,
-                        h.new_len,
-                    ])?;
-                }
+            for h in &diff.hunks {
+                hunks_app.append_row(params![
+                    commit.sha,
+                    h.path,
+                    h.prev_path,
+                    h.old_start,
+                    h.old_len,
+                    h.new_start,
+                    h.new_len,
+                ])?;
             }
         }
 
@@ -236,61 +220,39 @@ pub fn run(
                 &mut blob_cache,
                 &mut lang_registry,
             ) {
-                {
-                    let mut stmt = tx.prepare_cached(
-                        "INSERT INTO file_stats(sha, path, language, code, comments, blanks)
-                         VALUES(?, ?, ?, ?, ?, ?)
-                         ON CONFLICT (sha, path) DO UPDATE SET
-                            language = excluded.language,
-                            code     = excluded.code,
-                            comments = excluded.comments,
-                            blanks   = excluded.blanks",
-                    )?;
-                    for f in &files {
-                        stmt.execute(params![
+                for f in &files {
+                    file_stats_app.append_row(params![
+                        commit.sha,
+                        f.stat.path,
+                        f.stat.language,
+                        f.stat.code,
+                        f.stat.comments,
+                        f.stat.blanks
+                    ])?;
+                    for def in &f.funcs {
+                        funcs_app.append_row(params![
                             commit.sha,
                             f.stat.path,
-                            f.stat.language,
-                            f.stat.code,
-                            f.stat.comments,
-                            f.stat.blanks
+                            def.name,
+                            def.kind,
+                            def.start_line,
+                            def.end_line,
                         ])?;
-                    }
-                }
-                {
-                    let mut stmt = tx.prepare_cached(
-                        "INSERT INTO funcs(sha, path, name, kind, start_line, end_line)
-                         VALUES(?, ?, ?, ?, ?, ?)
-                         ON CONFLICT (sha, path, name, start_line) DO UPDATE SET
-                            kind     = excluded.kind,
-                            end_line = excluded.end_line",
-                    )?;
-                    for f in &files {
-                        for def in &f.funcs {
-                            stmt.execute(params![
-                                commit.sha,
-                                f.stat.path,
-                                def.name,
-                                def.kind,
-                                def.start_line,
-                                def.end_line,
-                            ])?;
-                        }
                     }
                 }
             }
         }
 
-        in_chunk += 1;
-        if in_chunk >= COMMIT_CHUNK {
-            tx.commit()?;
-            // Force a checkpoint after every chunk so DuckDB releases
-            // per-tx page buffers back to the OS. Without this, memory
-            // grows monotonically across a long index run and OOMs on
-            // mid-size repos before finish.
-            cache.conn.execute_batch("CHECKPOINT;")?;
-            in_chunk = 0;
-            tx = cache.conn.transaction()?;
+        since_flush += 1;
+        if since_flush >= FLUSH_EVERY {
+            commits_app.flush()?;
+            parents_app.flush()?;
+            trailers_app.flush()?;
+            hunks_app.flush()?;
+            churn_app.flush()?;
+            file_stats_app.flush()?;
+            funcs_app.flush()?;
+            since_flush = 0;
         }
 
         let done = i + 1;
@@ -315,35 +277,51 @@ pub fn run(
     }
     eprintln!();
 
-    // Tags — insert after all commits so the FK target is present. Ignore
-    // tags whose target didn't land in `commits` (foreign tips outside the
-    // walked set).
-    {
-        let mut stmt = tx.prepare_cached(
+    // Final flush + drop appenders before any query/DDL touches these
+    // tables. Appender::drop calls flush(), but calling explicitly keeps
+    // error handling straightforward and makes the ordering obvious.
+    commits_app.flush()?;
+    parents_app.flush()?;
+    trailers_app.flush()?;
+    hunks_app.flush()?;
+    churn_app.flush()?;
+    file_stats_app.flush()?;
+    funcs_app.flush()?;
+    drop(commits_app);
+    drop(parents_app);
+    drop(trailers_app);
+    drop(hunks_app);
+    drop(churn_app);
+    drop(file_stats_app);
+    drop(funcs_app);
+
+    // Tags — inserted after all commits so the FK target is present.
+    // Ignore tags whose target didn't land in `commits` (foreign tips
+    // outside the walked set).
+    for t in &tag_infos {
+        let commit_exists: bool = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM commits WHERE sha = ?",
+                params![t.sha],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !commit_exists {
+            continue;
+        }
+        cache.conn.execute(
             "INSERT INTO tags(name, sha, tagged_at) VALUES(?, ?, ?)
              ON CONFLICT (name) DO UPDATE SET
                 sha       = excluded.sha,
                 tagged_at = excluded.tagged_at",
+            params![t.name, t.sha, t.tagged_at],
         )?;
-        for t in &tag_infos {
-            let commit_exists: bool = tx
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM commits WHERE sha = ?",
-                    params![t.sha],
-                    |r| r.get(0),
-                )
-                .unwrap_or(false);
-            if !commit_exists {
-                continue;
-            }
-            stmt.execute(params![t.name, t.sha, t.tagged_at])?;
-        }
     }
 
     if let Some(head) = all_commits.last() {
-        queries::set_indexed_head(&tx, &head.sha)?;
+        queries::set_indexed_head(&cache.conn, &head.sha)?;
     }
-    tx.commit()?;
 
     // Rebuild secondary indexes after bulk write completes. Query paths
     // downstream (cohort fold, subcommand queries) depend on them.
