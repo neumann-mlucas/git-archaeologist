@@ -92,20 +92,21 @@ pub fn run(
     let cfg = crate::config::load().context("loading user config for aliases")?;
     let mut resolver = AuthorResolver::new(repo, &cfg.aliases);
 
-    let mut churn_map = churn::batch_all(repo).unwrap_or_default();
+    // Chunked churn + treesitter: keeps peak RSS bounded by one chunk's
+    // worth of diffs + snapshots rather than the entire repo's. The
+    // chunk size trades peak RSS for tree-sitter dedup rate — the
+    // unique-blob cache is per-chunk. For ratatui the two are already
+    // in tension; the value below is a middle-ground default.
+    const INDEX_CHUNK: usize = 1000;
 
-    // Two-phase parallel treesitter: serial tree walk collects a unique
-    // blob set (no dedup loss), then rayon-parses each blob once. Prior
-    // per-sha-parallel design killed the cross-commit BlobCache and cost
-    // ~60s on ratatui; this design gets the parallelism without the
-    // dedup regression.
-    let sampled_shas: Vec<String> = all_commits
+    // Pre-collect the (sha, parent_id) list once for the whole DAG so
+    // each chunk's churn call can slice into it instead of re-walking
+    // rev-list per chunk. Also index by sha for O(1) chunk lookup.
+    let all_jobs = churn::collect_all_jobs(repo).unwrap_or_default();
+    let job_by_sha: std::collections::HashMap<String, (String, Option<gix::ObjectId>)> = all_jobs
         .iter()
-        .zip(assignments.iter())
-        .filter(|(_, plan)| plan.is_sampled)
-        .map(|(commit, _)| commit.sha.clone())
+        .map(|j| (j.0.clone(), j.clone()))
         .collect();
-    let mut snapshot_map = treesitter::batch_sampled(repo, &sampled_shas);
 
     // Flush cadence: how many commits between BEGIN/COMMIT chunk
     // boundaries + Appender flushes. Trade-off:
@@ -170,117 +171,158 @@ pub fn run(
 
     let mut since_flush: usize = 0;
 
-    for (i, (commit, plan)) in all_commits.iter().zip(assignments.iter()).enumerate() {
-        if already.contains(&commit.sha) && !opts.force_full {
+    // Outer chunk: pre-compute churn + treesitter snapshots for a
+    // window of commits, then run the insert loop over that window,
+    // then drop the window's data before moving on. Peak RSS is now
+    // ~one window instead of the whole repo.
+    let commit_pairs: Vec<_> = all_commits.iter().zip(assignments.iter()).enumerate().collect();
+    for window in commit_pairs.chunks(INDEX_CHUNK) {
+        // Pending shas in this window (skip already-indexed).
+        let pending_shas: Vec<String> = window
+            .iter()
+            .filter_map(|(_, (commit, _))| {
+                if already.contains(&commit.sha) && !opts.force_full {
+                    None
+                } else {
+                    Some(commit.sha.clone())
+                }
+            })
+            .collect();
+        if pending_shas.is_empty() {
             continue;
         }
 
-        let author_id =
-            resolver.resolve(&cache.conn, &commit.author_name, &commit.author_email)?;
-        let committer_id = resolver.resolve(
-            &cache.conn,
-            &commit.committer_name,
-            &commit.committer_email,
-        )?;
+        // Slice the pre-collected job list to just this chunk (skips
+        // shas that were already-indexed or aren't in the DAG).
+        let chunk_jobs: Vec<_> = pending_shas
+            .iter()
+            .filter_map(|s| job_by_sha.get(s).cloned())
+            .collect();
+        let mut churn_map = churn::process_jobs(repo, &chunk_jobs);
+        let sampled_shas: Vec<String> = window
+            .iter()
+            .filter_map(|(_, (commit, plan))| {
+                if plan.is_sampled && !(already.contains(&commit.sha) && !opts.force_full) {
+                    Some(commit.sha.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut snapshot_map = treesitter::batch_sampled(repo, &sampled_shas);
 
-        commits_app.append_row(params![
-            commit.sha,
-            author_id,
-            committer_id,
-            commit.committed_at.unix_timestamp(),
-            commit.is_merge,
-            plan.is_sampled,
-            plan.bucket_key,
-            commit.conv.msg_type,
-            commit.conv.is_breaking,
-            commit.conv.is_revert,
-            commit.ignored_blame,
-        ])?;
-
-        for (idx, parent) in commit.parents.iter().enumerate() {
-            parents_app.append_row(params![commit.sha, parent, idx as i32])?;
-        }
-
-        for tr in &commit.trailers {
-            let tid = resolver.resolve(&cache.conn, &tr.ident.name, &tr.ident.email)?;
-            trailers_app.append_row(params![commit.sha, tid, tr.role.as_str()])?;
-        }
-
-        // remove() drops the entry as we go so peak RSS trails commit
-        // progress rather than sitting at "everything I ever computed."
-        if let Some(diff) = churn_map.remove(&commit.sha) {
-            for c in diff.churn {
-                churn_app.append_row(params![commit.sha, c.path, c.added, c.deleted])?;
+        for (i, (commit, plan)) in window {
+            if already.contains(&commit.sha) && !opts.force_full {
+                continue;
             }
-            for h in diff.hunks {
-                hunks_app.append_row(params![
-                    commit.sha,
-                    h.path,
-                    h.prev_path,
-                    h.old_start,
-                    h.old_len,
-                    h.new_start,
-                    h.new_len,
-                ])?;
-            }
-        }
 
-        if plan.is_sampled {
-            if let Some(files) = snapshot_map.remove(&commit.sha) {
-                for f in files {
-                    file_stats_app.append_row(params![
+            let author_id =
+                resolver.resolve(&cache.conn, &commit.author_name, &commit.author_email)?;
+            let committer_id = resolver.resolve(
+                &cache.conn,
+                &commit.committer_name,
+                &commit.committer_email,
+            )?;
+
+            commits_app.append_row(params![
+                commit.sha,
+                author_id,
+                committer_id,
+                commit.committed_at.unix_timestamp(),
+                commit.is_merge,
+                plan.is_sampled,
+                plan.bucket_key,
+                commit.conv.msg_type,
+                commit.conv.is_breaking,
+                commit.conv.is_revert,
+                commit.ignored_blame,
+            ])?;
+
+            for (idx, parent) in commit.parents.iter().enumerate() {
+                parents_app.append_row(params![commit.sha, parent, idx as i32])?;
+            }
+
+            for tr in &commit.trailers {
+                let tid = resolver.resolve(&cache.conn, &tr.ident.name, &tr.ident.email)?;
+                trailers_app.append_row(params![commit.sha, tid, tr.role.as_str()])?;
+            }
+
+            if let Some(diff) = churn_map.remove(&commit.sha) {
+                for c in diff.churn {
+                    churn_app.append_row(params![commit.sha, c.path, c.added, c.deleted])?;
+                }
+                for h in diff.hunks {
+                    hunks_app.append_row(params![
                         commit.sha,
-                        f.stat.path,
-                        f.stat.language,
-                        f.stat.code,
-                        f.stat.comments,
-                        f.stat.blanks
+                        h.path,
+                        h.prev_path,
+                        h.old_start,
+                        h.old_len,
+                        h.new_start,
+                        h.new_len,
                     ])?;
-                    for def in f.funcs {
-                        funcs_app.append_row(params![
+                }
+            }
+
+            if plan.is_sampled {
+                if let Some(files) = snapshot_map.remove(&commit.sha) {
+                    for f in files {
+                        file_stats_app.append_row(params![
                             commit.sha,
                             f.stat.path,
-                            def.name,
-                            def.kind,
-                            def.start_line,
-                            def.end_line,
+                            f.stat.language,
+                            f.stat.code,
+                            f.stat.comments,
+                            f.stat.blanks
                         ])?;
+                        for def in f.funcs {
+                            funcs_app.append_row(params![
+                                commit.sha,
+                                f.stat.path,
+                                def.name,
+                                def.kind,
+                                def.start_line,
+                                def.end_line,
+                            ])?;
+                        }
                     }
                 }
             }
-        }
 
-        since_flush += 1;
-        if since_flush >= FLUSH_EVERY {
-            commits_app.flush()?;
-            parents_app.flush()?;
-            trailers_app.flush()?;
-            hunks_app.flush()?;
-            churn_app.flush()?;
-            file_stats_app.flush()?;
-            funcs_app.flush()?;
-            since_flush = 0;
-        }
+            since_flush += 1;
+            if since_flush >= FLUSH_EVERY {
+                commits_app.flush()?;
+                parents_app.flush()?;
+                trailers_app.flush()?;
+                hunks_app.flush()?;
+                churn_app.flush()?;
+                file_stats_app.flush()?;
+                funcs_app.flush()?;
+                since_flush = 0;
+            }
 
-        let done = i + 1;
-        let now = std::time::Instant::now();
-        if done == total || now.duration_since(last_progress_at) >= progress_interval {
-            let elapsed = now.duration_since(start_at).as_secs_f64();
-            let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
-            let eta_s = if rate > 0.0 {
-                (total - done) as f64 / rate
-            } else {
-                0.0
-            };
-            eprint!(
-                "\rindex: {done}/{total} ({:.0}%) {rate:.0}/s eta {eta_s:.0}s   ",
-                (done as f64 / total as f64) * 100.0
-            );
-            last_progress_at = now;
-            if let Some(sender) = &progress {
-                let _ = sender.send(Progress::Commit { done, total });
+            let done = *i + 1;
+            let now = std::time::Instant::now();
+            if done == total || now.duration_since(last_progress_at) >= progress_interval {
+                let elapsed = now.duration_since(start_at).as_secs_f64();
+                let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
+                let eta_s = if rate > 0.0 {
+                    (total - done) as f64 / rate
+                } else {
+                    0.0
+                };
+                eprint!(
+                    "\rindex: {done}/{total} ({:.0}%) {rate:.0}/s eta {eta_s:.0}s   ",
+                    (done as f64 / total as f64) * 100.0
+                );
+                last_progress_at = now;
+                if let Some(sender) = &progress {
+                    let _ = sender.send(Progress::Commit { done, total });
+                }
             }
         }
+        // churn_map + snapshot_map drop here → peak RSS resets between
+        // windows.
     }
     eprintln!();
 

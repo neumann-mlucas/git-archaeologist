@@ -54,8 +54,41 @@ const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 /// via `map_init` — gix::Repository is `!Sync` but re-opening the same
 /// `.git/` from N threads is safe.
 pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
-    // Step 1 (serial): collect the (sha, parent_id?) list for every
-    // non-merge commit. Cheap traversal, no blob I/O.
+    let jobs = collect_jobs(repo)?;
+    Ok(process_jobs(repo, &jobs))
+}
+
+/// Same as [`batch_all`] but restricted to a caller-supplied set of
+/// commit shas. Used by the chunked indexer path to bound peak RSS —
+/// callers slice `all_commits` into fixed-size windows and only
+/// materialize one window's diffs at a time.
+///
+/// Merge commits (parents.len() > 1) are silently dropped, matching
+/// `batch_all`. If a sha isn't findable, it's silently dropped.
+pub fn batch_shas(
+    repo: &Repo,
+    shas: &[String],
+) -> HashMap<String, CommitDiff> {
+    let mut jobs: Vec<(String, Option<gix::ObjectId>)> = Vec::with_capacity(shas.len());
+    for sha in shas {
+        let Some(oid) = sha.parse::<gix::ObjectId>().ok() else {
+            continue;
+        };
+        let Ok(commit) = repo.git.find_commit(oid) else {
+            continue;
+        };
+        let parents: Vec<_> = commit.parent_ids().collect();
+        if parents.len() > 1 {
+            continue;
+        }
+        jobs.push((sha.clone(), parents.first().map(|p| p.detach())));
+    }
+    process_jobs(repo, &jobs)
+}
+
+fn collect_jobs(
+    repo: &Repo,
+) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
     let head_id = repo.git.head_id().context("resolving HEAD id")?;
     let walk = repo
         .git
@@ -69,7 +102,6 @@ pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
         let info = info.context("walking commit for diff")?;
         let commit = info.object().context("loading commit object")?;
         let parents: Vec<_> = commit.parent_ids().collect();
-        // Skip merges — line up with walker's non-merge sampling.
         if parents.len() > 1 {
             continue;
         }
@@ -78,12 +110,14 @@ pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
             parents.first().map(|p| p.detach()),
         ));
     }
+    Ok(jobs)
+}
 
-    // Step 2 (parallel): per-worker gix::Repository does the blob diff.
-    // `.git` path is what gix::open expects. Repo::git.path() returns
-    // exactly that.
+pub fn process_jobs(
+    repo: &Repo,
+    jobs: &[(String, Option<gix::ObjectId>)],
+) -> HashMap<String, CommitDiff> {
     let git_dir: PathBuf = repo.git.path().to_path_buf();
-
     let results: Vec<(String, CommitDiff)> = jobs
         .par_iter()
         .map_init(
@@ -94,8 +128,16 @@ pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
             },
         )
         .collect();
+    results.into_iter().collect()
+}
 
-    Ok(results.into_iter().collect())
+/// Public accessor for the (sha, parent_id) job list — used by the
+/// chunked indexer path so it can call `process_jobs` on slices instead
+/// of paying the per-sha `find_commit` overhead of [`batch_shas`].
+pub fn collect_all_jobs(
+    repo: &Repo,
+) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
+    collect_jobs(repo)
 }
 
 /// Compute the (hunks, churn) delta for a single commit against its
