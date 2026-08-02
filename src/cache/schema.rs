@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS churn (
     PRIMARY KEY (sha, path)
 );
 CREATE INDEX IF NOT EXISTS idx_churn_path ON churn(path);
+
+CREATE TABLE IF NOT EXISTS blame (
+    sha        TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    author_id  BIGINT NOT NULL,
+    line_count INTEGER NOT NULL,
+    PRIMARY KEY (sha, path, author_id)
+);
+CREATE INDEX IF NOT EXISTS idx_blame_author ON blame(author_id);
+CREATE INDEX IF NOT EXISTS idx_blame_sha    ON blame(sha);
 "#;
 
 pub fn migrate(conn: &Connection) -> Result<()> {

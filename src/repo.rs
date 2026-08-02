@@ -77,5 +77,15 @@ pub fn open(path: &Path) -> Result<Repo> {
         std::fs::create_dir_all(parent).context("creating cache dir")?;
     }
 
+    // Pre-XDG builds wrote the cache to .git/git-archaeologist/cache.sqlite.
+    // If found, delete it silently — the new cache lives in XDG data.
+    let legacy_dir = repo.git.path().join("git-archaeologist");
+    let legacy_cache = legacy_dir.join("cache.sqlite");
+    if legacy_cache.exists() {
+        let _ = std::fs::remove_file(&legacy_cache);
+        // Best-effort remove of the now-empty parent dir.
+        let _ = std::fs::remove_dir(&legacy_dir);
+    }
+
     Ok(repo)
 }

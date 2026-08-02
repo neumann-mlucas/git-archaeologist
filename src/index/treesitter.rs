@@ -233,6 +233,11 @@ impl LangRegistry {
         let ext = Path::new(path).extension().and_then(|s| s.to_str())?;
         self.by_ext.get(ext.to_ascii_lowercase().as_str())
     }
+
+    /// Public accessor — is this path recognized by any grammar?
+    pub fn is_known(&self, path: &str) -> bool {
+        self.spec_for(path).is_some()
+    }
 }
 
 impl Default for LangRegistry {
@@ -338,11 +343,11 @@ fn parse_blob(
 
 /// Classify every line of source as blank / comment / code.
 /// Rules:
-///   - blank:   line has no non-whitespace bytes at all.
-///   - code:    line has non-whitespace bytes OUTSIDE any comment-node byte
-///              range. (Matches tokei: `let x = 1; // trailing` is code.)
+///   - blank: line has no non-whitespace bytes at all.
+///   - code: line has non-whitespace bytes OUTSIDE any comment-node byte
+///     range. (Matches tokei: `let x = 1; // trailing` is code.)
 ///   - comment: line has non-whitespace bytes AND every one falls inside
-///              a comment-node byte range.
+///     a comment-node byte range.
 fn count_lines(source: &[u8], root: Node, comment_kinds: &[&str]) -> (u32, u32, u32) {
     if source.is_empty() {
         return (0, 0, 0);
@@ -423,5 +428,150 @@ fn collect_comment_ranges(node: Node, comment_kinds: &[&str], out: &mut Vec<(usi
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_comment_ranges(child, comment_kinds, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse `src` under `lang`, count lines against `comment_kinds`.
+    fn count(lang: Language, comment_kinds: &[&str], src: &str) -> (u32, u32, u32) {
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        count_lines(src.as_bytes(), tree.root_node(), comment_kinds)
+    }
+
+    #[test]
+    fn rust_mixed() {
+        // 5 code, 3 comments, 2 blanks (10 lines total).
+        let src = "\
+// header comment
+fn main() {
+    let x = 1; // trailing comment counts as code
+
+    // full-line comment
+    let y = x + 1;
+    println!(\"{y}\");
+}
+";
+        let (code, comments, blanks) = count(
+            tree_sitter_rust::LANGUAGE.into(),
+            &["line_comment", "block_comment"],
+            src,
+        );
+        assert_eq!(code, 5, "code count");
+        assert_eq!(comments, 2, "comment count");
+        assert_eq!(blanks, 1, "blank count");
+    }
+
+    #[test]
+    fn python_docstring_is_not_a_comment() {
+        // Python `#` comments only. Triple-quoted docstrings are string
+        // expressions, not comments — should count as code.
+        let src = "\
+# leading comment
+def add(a, b):
+    \"\"\"docstring line 1
+    docstring line 2\"\"\"
+    return a + b
+
+# trailing
+";
+        let (code, comments, blanks) = count(
+            tree_sitter_python::LANGUAGE.into(),
+            &["comment"],
+            src,
+        );
+        assert_eq!(comments, 2);
+        assert_eq!(blanks, 1);
+        // 4 code lines: `def`, docstring line 1, docstring line 2, `return`.
+        assert_eq!(code, 4);
+    }
+
+    #[test]
+    fn go_block_comment() {
+        let src = "\
+package main
+
+/* block comment
+   spans lines */
+func main() {
+    println(\"hi\")
+}
+";
+        let (code, comments, blanks) = count(
+            tree_sitter_go::LANGUAGE.into(),
+            &["comment"],
+            src,
+        );
+        assert_eq!(comments, 2);
+        assert_eq!(blanks, 1);
+        assert_eq!(code, 4);
+    }
+
+    #[test]
+    fn cpp_mixed_styles() {
+        let src = "\
+// line comment
+#include <cstdio>
+
+/* block
+   comment */
+int main() {
+    printf(\"hi\"); // trailing
+    return 0;
+}
+";
+        let (code, comments, blanks) = count(
+            tree_sitter_cpp::LANGUAGE.into(),
+            &["comment"],
+            src,
+        );
+        // 5 code lines: #include, int main() {, printf trailing, return, }.
+        assert_eq!(code, 5);
+        assert_eq!(comments, 3);
+        assert_eq!(blanks, 1);
+    }
+
+    #[test]
+    fn toml_comment() {
+        let src = "\
+# top-level comment
+[package]
+name = \"foo\"
+
+# section comment
+version = \"1.0\"
+";
+        let (code, comments, blanks) = count(
+            tree_sitter_toml_ng::LANGUAGE.into(),
+            &["comment"],
+            src,
+        );
+        assert_eq!(code, 3);
+        assert_eq!(comments, 2);
+        assert_eq!(blanks, 1);
+    }
+
+    #[test]
+    fn empty_source() {
+        assert_eq!(
+            count(tree_sitter_rust::LANGUAGE.into(), &["line_comment"], ""),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn registry_extension_lookup() {
+        let r = LangRegistry::new();
+        assert!(r.spec_for("foo.rs").is_some());
+        assert!(r.spec_for("foo.PY").is_some());
+        assert!(r.spec_for("foo.cxx").is_some());
+        assert!(r.spec_for("Cargo.toml").is_some());
+        assert!(r.spec_for("README.md").is_some());
+        assert!(r.spec_for("foo.unknown").is_none());
+        assert!(r.spec_for("no_extension").is_none());
     }
 }

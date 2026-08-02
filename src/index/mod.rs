@@ -1,3 +1,4 @@
+pub mod blame;
 pub mod bucket;
 pub mod churn;
 pub mod mailmap;
@@ -17,10 +18,10 @@ use crate::index::walker::CommitInfo;
 use crate::repo::Repo;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by M7 progress modal
 pub enum Progress {
     Started { total_commits: usize, sampled: usize },
     Commit { done: usize, total: usize },
+    Blame { done: usize, total: usize },
     Finished,
 }
 
@@ -76,8 +77,18 @@ pub fn run(
     let mut blob_cache = treesitter::BlobCache::default();
     let mut lang_registry = treesitter::LangRegistry::new();
 
-    // One big transaction — SQLite is much faster this way.
-    let tx = cache.conn.transaction()?;
+    // Chunked transactions — one giant tx OOMs DuckDB on large repos
+    // (buffered rows never released mid-tx). Re-run is idempotent via
+    // ON CONFLICT DO UPDATE, so a partial commit boundary is safe.
+    const COMMIT_CHUNK: usize = 500;
+
+    // Time-based progress throttle. Coarse commit-count throttling looked
+    // stalled on slow diffs (large trees, single 10s commit → no update).
+    let mut last_progress_at = std::time::Instant::now();
+    let progress_interval = std::time::Duration::from_millis(100);
+
+    let mut tx = cache.conn.transaction()?;
+    let mut in_chunk: usize = 0;
 
     for (i, (commit, plan)) in all_commits.iter().zip(assignments.iter()).enumerate() {
         if already.contains(&commit.sha) && !opts.force_full {
@@ -152,12 +163,22 @@ pub fn run(
             }
         }
 
-        // Throttle: 35k channel sends dominate over the actual index work on
-        // fast repos. One update per ~64 commits (and one for the final one).
+        in_chunk += 1;
+        if in_chunk >= COMMIT_CHUNK {
+            tx.commit()?;
+            in_chunk = 0;
+            tx = cache.conn.transaction()?;
+        }
+
+        // Throttle: emit at most one progress event per `progress_interval`,
+        // plus one on the final commit. Time-based so slow diffs still show
+        // motion; fast repos aren't drowned in 35k channel sends.
         if let Some(sender) = &progress {
             let done = i + 1;
-            if done == total || done & 0x3F == 0 {
+            let now = std::time::Instant::now();
+            if done == total || now.duration_since(last_progress_at) >= progress_interval {
                 let _ = sender.send(Progress::Commit { done, total });
+                last_progress_at = now;
             }
         }
     }
@@ -165,8 +186,67 @@ pub fn run(
     if let Some(head) = all_commits.last() {
         queries::set_indexed_head(&tx, &head.sha)?;
     }
-
     tx.commit()?;
+
+    // Blame pass — attribute lines in every sampled snapshot. Skip shas
+    // that already have blame rows (idempotent re-run). Cost scales as
+    // O(files × sampled buckets × blame_runtime); the sampling in the
+    // walker already keeps `sampled buckets` small (~52 for a year of
+    // weekly data), so the walk stays tractable.
+    let already_blamed: HashSet<String> = {
+        let mut stmt = cache.conn.prepare("SELECT DISTINCT sha FROM blame")?;
+        let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        iter.collect::<duckdb::Result<_>>()?
+    };
+
+    let sampled_shas: Vec<String> = all_commits
+        .iter()
+        .zip(assignments.iter())
+        .filter(|(_, plan)| plan.is_sampled)
+        .map(|(c, _)| c.sha.clone())
+        .filter(|s| opts.force_full || !already_blamed.contains(s))
+        .collect();
+
+    let total_shas = sampled_shas.len();
+    let mut last_blame_at = std::time::Instant::now();
+
+    for (idx, sha) in sampled_shas.iter().enumerate() {
+        let counts =
+            match blame::snapshot(repo, sha, &mut resolver, &cache.conn, &lang_registry) {
+                Ok(c) => c,
+                Err(_) => continue, // per-sha failure (missing commit, etc.) → skip
+            };
+
+        // Wipe any existing blame for this sha before repopulating (idempotent).
+        cache
+            .conn
+            .execute("DELETE FROM blame WHERE sha = ?", params![sha])?;
+
+        let tx = cache.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO blame(sha, path, author_id, line_count) VALUES(?, ?, ?, ?)
+                 ON CONFLICT (sha, path, author_id) DO UPDATE SET
+                    line_count = excluded.line_count",
+            )?;
+            for entry in &counts {
+                for (author_id, lines) in &entry.by_author {
+                    stmt.execute(params![sha, entry.path, author_id, *lines as i64])?;
+                }
+            }
+        }
+        tx.commit()?;
+
+        if let Some(sender) = &progress {
+            let done = idx + 1;
+            let now = std::time::Instant::now();
+            if done == total_shas || now.duration_since(last_blame_at) >= progress_interval
+            {
+                let _ = sender.send(Progress::Blame { done, total: total_shas });
+                last_blame_at = now;
+            }
+        }
+    }
 
     if let Some(sender) = &progress {
         let _ = sender.send(Progress::Finished);
@@ -177,7 +257,7 @@ pub fn run(
 
 fn wipe_data(cache: &Cache) -> Result<()> {
     cache.conn.execute_batch(
-        "DELETE FROM file_stats; DELETE FROM churn; DELETE FROM commits;",
+        "DELETE FROM blame; DELETE FROM file_stats; DELETE FROM churn; DELETE FROM commits;",
     )?;
     Ok(())
 }
@@ -216,4 +296,89 @@ fn assign_buckets(commits: &[CommitInfo], size: BucketSize) -> Vec<BucketAssignm
             is_sampled,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use crate::cache;
+    use crate::index::{self, bucket::BucketSize};
+    use crate::repo;
+
+    /// Init a git repo in `dir` and add `n` commits touching one Rust file
+    /// each. Each commit adds ~2 lines. Skips if `git` isn't on PATH.
+    fn seed_repo(dir: &Path, n: usize) {
+        let run_git = |args: &[&str], date: &str| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Alice")
+                .env("GIT_AUTHOR_EMAIL", "alice@example.com")
+                .env("GIT_COMMITTER_NAME", "Alice")
+                .env("GIT_COMMITTER_EMAIL", "alice@example.com")
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .status()
+                .expect("git failed to execute")
+        };
+        let noop = "2025-01-01T00:00:00Z";
+        assert!(run_git(&["init", "-q", "-b", "main"], noop).success());
+        assert!(run_git(&["config", "commit.gpgsign", "false"], noop).success());
+        for i in 0..n {
+            let path = dir.join("main.rs");
+            let mut body = String::new();
+            for k in 0..=i {
+                body.push_str(&format!("fn f{k}() {{ println!(\"{k}\"); }}\n"));
+            }
+            std::fs::write(&path, body).unwrap();
+            assert!(run_git(&["add", "main.rs"], noop).success());
+            // Distinct timestamp per commit so bucket_key(Commit) differs
+            // and each commit is its own sampled bucket.
+            let date = format!("2025-01-0{}T00:00:00Z", i + 1);
+            assert!(
+                run_git(&["commit", "-q", "-m", &format!("commit {i}")], &date).success(),
+                "commit {i} failed"
+            );
+        }
+    }
+
+    #[test]
+    fn smoke_index_tiny_repo() {
+        // Skip when `git` isn't available.
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("skip: git not on PATH");
+            return;
+        }
+
+        let td = TempDir::new().unwrap();
+        seed_repo(td.path(), 3);
+
+        let repo = repo::open(td.path()).expect("open repo");
+
+        // Redirect the DuckDB cache to a temp file so we don't touch
+        // the user's XDG data dir.
+        let cache_file = td.path().join("cache.duckdb");
+        let mut cache = cache::open(&cache_file).expect("open cache");
+
+        index::run(
+            &repo,
+            &mut cache,
+            index::IndexOptions {
+                force_full: true,
+                bucket_override: Some(BucketSize::Commit),
+            },
+            None,
+        )
+        .expect("index run");
+
+        let stats = crate::query::cache_stats(&cache.conn).unwrap();
+        assert_eq!(stats.commits, 3, "commits row count");
+        assert!(stats.churn >= 3, "churn rows >= commits");
+        assert!(stats.file_stats >= 3, "file_stats rows >= sampled commits");
+        assert!(stats.authors >= 1, "authors row present");
+    }
 }

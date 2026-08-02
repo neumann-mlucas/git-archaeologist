@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use ratatui::layout::{Constraint, Flex, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Cell, Row, Table, TableState};
@@ -5,6 +7,9 @@ use ratatui::Frame;
 
 use crate::app::{AppState, SortCol};
 use crate::ui::{palette, panel_block};
+
+const SPARK_WIDTH: usize = 12;
+const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
     let mark = |c: SortCol, label: &str| {
@@ -20,6 +25,7 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
         Cell::from(mark(SortCol::Group, "Group")),
         Cell::from(mark(SortCol::Total, "Total")),
         Cell::from(mark(SortCol::Delta, "Δ")),
+        Cell::from("Trend"),
         Cell::from("% of scope"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
@@ -28,6 +34,7 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
     // denominator flips signs and makes >100% percentages. Use absolute values.
     let total_sum: i64 = state.breakdown.iter().map(|r| r.total.abs()).sum();
     let palette_kind = state.cfg.palette_kind();
+    let trends = per_group_sparklines(state);
 
     let rows: Vec<Row> = state
         .breakdown
@@ -39,11 +46,13 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
             } else {
                 0.0
             };
+            let trend = trends.get(&r.group).cloned().unwrap_or_default();
             Row::new(vec![
                 Cell::from("●").style(Style::default().fg(color)),
                 Cell::from(truncate(&r.group, 28)),
                 Cell::from(fmt_num(r.total)),
                 Cell::from(fmt_delta(r.delta)),
+                Cell::from(trend),
                 Cell::from(format!("{share:.1}%")),
             ])
         })
@@ -59,6 +68,7 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
             Constraint::Length(30),
             Constraint::Length(14),
             Constraint::Length(14),
+            Constraint::Length(SPARK_WIDTH as u16),
             Constraint::Length(11),
         ],
     )
@@ -69,6 +79,47 @@ pub fn render(f: &mut Frame, state: &AppState, area: Rect, focused: bool) {
     .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     f.render_stateful_widget(table, area, &mut table_state);
+}
+
+/// Build a per-group tail sparkline from the current series. Uses the last
+/// `SPARK_WIDTH` buckets of each group; single-bucket groups render nothing.
+fn per_group_sparklines(state: &AppState) -> HashMap<String, String> {
+    let mut per_group: HashMap<String, BTreeMap<i64, i64>> = HashMap::new();
+    for p in &state.series {
+        per_group
+            .entry(p.group.clone())
+            .or_default()
+            .insert(p.bucket, p.value);
+    }
+    per_group
+        .into_iter()
+        .map(|(g, m)| (g, sparkline(m.values().copied())))
+        .collect()
+}
+
+fn sparkline<I: IntoIterator<Item = i64>>(values: I) -> String {
+    let vs: Vec<i64> = values.into_iter().collect();
+    if vs.len() < 2 {
+        return String::new();
+    }
+    let tail: &[i64] = if vs.len() > SPARK_WIDTH {
+        &vs[vs.len() - SPARK_WIDTH..]
+    } else {
+        &vs
+    };
+    let min = *tail.iter().min().unwrap();
+    let max = *tail.iter().max().unwrap();
+    if min == max {
+        // Flat line — render middle-block to convey "signal exists, no motion".
+        return BLOCKS[3].to_string().repeat(tail.len());
+    }
+    let span = (max - min) as f64;
+    tail.iter()
+        .map(|v| {
+            let n = ((*v - min) as f64 / span * (BLOCKS.len() - 1) as f64).round() as usize;
+            BLOCKS[n.min(BLOCKS.len() - 1)]
+        })
+        .collect()
 }
 
 fn fmt_num(n: i64) -> String {

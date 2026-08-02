@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Interactive TUI to explore the evolution of a git repository"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/neumann/git-archaeologist"
+repository = "https://github.com/neumann-mlucas/git-archaeologist"
 readme = "README.md"
 rust-version = "1.85"
 

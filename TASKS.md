@@ -2,24 +2,76 @@
 
 ## Now — ship blockers
 
-- [ ] **Tests.** Zero coverage after 5 refactor slices. Minimum set:
-      - `treesitter::count_lines` golden files per language (Rust, Python,
-        Go, C++, TOML — 5 fixtures, ~30 lines each with known counts).
-      - `bucket::bucket_key` unit — day / week (ISO year) / month / commit.
-      - `query::apply_view` — Structure Delta dense-fill, Activity
-        Cumulative running-sum.
-      - end-to-end smoke — `tempfile` a tiny git repo, index, assert
-        row counts across `commits` / `churn` / `file_stats`.
-- [ ] **TUI regression check.** Never launched interactively since the Lens
-      reframe landed. Boot each lens × view, drill in, apply filters,
-      screencap.
-- [ ] Fix `Cargo.toml` `repository` URL (currently unverified).
-- [ ] README refresh — Lens reframe, XDG cache path, DuckDB, tree-sitter
-      grammar list.
-- [ ] Coarse progress throttle (every 64 commits) → time-based (every
-      100 ms) so the bar doesn't look stalled on slow diffs.
-- [ ] `--export parquet <dir>` CLI verb (DuckDB `COPY … TO … FORMAT
-      PARQUET` — ~15 LOC).
+- [x] **Tests (legacy baseline).** `treesitter::count_lines`,
+      `bucket::bucket_key`, `query::apply_view`, tempdir end-to-end smoke.
+- [x] Fix `Cargo.toml` `repository` URL.
+- [x] README refresh.
+- [x] Coarse progress throttle (every 64 commits) → time-based (100 ms).
+- [x] `--export-parquet <dir>` CLI verb.
+- [ ] ~~TUI regression check.~~ Killed with the TUI (see SPEC rev 2).
+
+## Test strategy — implementation (matches SPEC §Test strategy)
+
+Four tiers. CI runs 0 + 1 on every push; 2 opt-in via feature flag;
+3 nightly / manual.
+
+### Tier 0 — unit
+
+- [x] `bucket::bucket_key` — day / week (ISO wrap) / month / commit.
+- [ ] `bucket::bucket_key` — `tag` variant.
+- [x] `treesitter::count_lines` — Rust, Python, Go fixtures.
+- [ ] `treesitter::count_lines` — JS, TS fixtures added.
+- [ ] `treesitter::extract_funcs` — one fixture per grammar, function +
+      test-attribute recognition (`#[test]`, `def test_*`, `@Test`, etc.).
+- [x] `query::apply_view` — cumulative running-sum, dense-fill.
+- [ ] `query::apply_view` — cohort dense-fill (new metric).
+- [ ] Trailer parser — `Co-authored-by:`, `Signed-off-by:`, quoted names,
+      unicode.
+- [ ] Conventional Commit parser — `feat!:`, `fix(scope):`, `revert:`,
+      malformed input.
+- [ ] `.git-blame-ignore-revs` loader — comments, blanks, missing file.
+
+### Tier 1 — golden repo integration
+
+- [ ] Build fixture generator `tests/support/golden.rs` — `tempfile` +
+      system `git`. 3 authors, 5 langs, 30 commits. Must include: rename,
+      merge, revert, `Co-authored-by:` trailer, `feat!:` breaking commit,
+      tag, `.git-blame-ignore-revs` entry.
+- [ ] Golden snapshots under `tests/data/golden/` — one `.tsv` per
+      subcommand output. Regenerate script `xtask/regenerate-goldens`.
+- [ ] Test per subcommand: `burndown`, `cohort`, `survival`, `coupling`,
+      `classify`, `hotspot`, `age`, `churn`, `sql` — byte-for-byte
+      against golden.
+- [ ] Round-trip test: `index && export parquet /tmp/x` → reopen parquet
+      via DuckDB → row counts match.
+
+### Tier 2 — small public repo smoke (`--features e2e`)
+
+- [ ] Cargo feature `e2e` gates the module.
+- [ ] Fixture clone helper — clone `ratatui-org/ratatui` at a pinned SHA
+      into `$XDG_CACHE_HOME/git-archaeologist-tests/`. Reuse on rerun.
+- [ ] Assertions:
+      - `git rev-list --count` == `commits` rows (exact).
+      - Total code lines within ±1% of `tokei --output json`.
+      - Every subcommand exits 0, non-empty stdout, default filters.
+      - Cohort latest-bucket surviving sum ≈ current total code (±0.5%).
+      - Coupling top-1 pair matches hand-checked `git log --name-only`.
+- [ ] Perf ceilings enforced: index < 30 s, any query < 500 ms.
+
+### Tier 3 — mid & mid-large bench (`--features bench-large`)
+
+- [ ] Cargo feature `bench-large` gates the module.
+- [ ] `benches/fixtures.toml` — pinned SHAs for `ratatui-org/ratatui`
+      (small), `astral-sh/uv` (mid, ~15k), `godotengine/godot`
+      (mid-large, ~60k).
+- [ ] Bench harness (`benches/bench.rs`) — indexes each fixture, runs
+      every subcommand, asserts perf ceilings + loose correctness bounds
+      (§SPEC table).
+- [ ] RSS ceiling < 2 GB on mid-large — track via `getrusage` in harness.
+- [ ] Optional side-by-side rows: if `hercules` / `git-of-theseus` on
+      `$PATH`, log their timings; do not gate on them.
+- [ ] Nightly GitHub Action `.github/workflows/bench.yml` — larger runner,
+      pushes result JSON to a `benches/results/` branch.
 
 ## Slice 4 (continued) — LOC engine
 
@@ -41,13 +93,19 @@ than blame-based ownership.*
 Real per-line author attribution. Unblocks the empty Ownership panel;
 required by Slice 7 wizard.
 
-- [ ] Blame implementation — likely `git blame --incremental` subprocess
-      per (path, sampled sha) tuple, cached in a new `blame` table:
-      `(sha, path, author_id, line_count)`.
-- [ ] Cache growth guard — bound by (files × sampled buckets); prune
-      LRU or wipe on `--reindex`.
-- [ ] `Lens::Ownership` series/breakdown queries land off this table.
-- [ ] Streaming progress reporter — blame is slow, needs a bar.
+- [x] Blame implementation — `git blame --incremental -w` subprocess per
+      (latest sampled sha, path) tuple, aggregated into the new `blame`
+      table `(sha, path, author_id, line_count)`. Parser handles the
+      "commit metadata once, header-only for repeats" streaming format
+      (see `parse_incremental` + tests).
+- [x] `Lens::Ownership` series/breakdown queries land off this table
+      (`ownership_series_by_author` in query.rs).
+- [x] Streaming progress reporter — reuses the splash bar; a `Progress::Blame`
+      variant emits every 100ms during the blame pass.
+- [x] Cache wipe on `--reindex` extended to the `blame` table.
+- [x] Historical blame — walk every sampled sha; skip shas already
+      populated in the `blame` table (idempotent re-runs). Ownership
+      series now varies across buckets, not just the latest snapshot.
 
 ## Slice 6 — UX bundle
 
@@ -55,9 +113,13 @@ Independent tweaks. Ship as micro-PRs.
 
 - [ ] Command palette (`:`) — searchable actions replace `b`/`f`/`l`/`a`
       single-key modals for the discoverable path.
-- [ ] `/` fuzzy filter inside author + language checklists.
-- [ ] Sparkline column in Breakdown table (per-row trend, tiny).
-- [ ] Interactive x-axis zoom / pan (`h/l/H/L`).
+- [x] Substring filter inside author + language checklists (type to
+      narrow, Backspace pops, Esc clears, `C` clears selection).
+- [x] Sparkline column in Breakdown table (unicode blocks, tail of the
+      current series per group).
+- [x] Interactive x-axis zoom / pan — `,` / `.` pan by 25%, `-` / `=`
+      zoom out / in (keys chosen to avoid the `L` = lens and `l` = language
+      modal clashes in the original `h/l/H/L` spec).
 - [ ] Diff-plot side-by-side (two date ranges or two refs).
 
 ## Slice 7 — Ownership wizard
@@ -76,14 +138,11 @@ Depends on Slice 5.
 
 ## Cleanup
 
-- [ ] Delete `query::subpaths` (currently `#[allow(dead_code)]`) — either
-      wire into path-picker (Slice 6) or drop.
-- [ ] Delete `config::merge_authors` if Slice 7 wizard slips —
-      re-introduce alongside if resumed.
-- [ ] Drop `#[allow(dead_code)]` on `index::Progress` variants — they
-      *are* consumed by the splash bar; comment is stale.
-- [ ] Delete orphaned `cache.sqlite` in `.git/git-archaeologist/` at
-      first Ownership indexer run (opt-in prompt).
+- [x] Deleted `query::subpaths` — reintroduce alongside Slice 6 path-picker.
+- [x] Deleted `config::merge_authors` — reintroduce alongside Slice 7 wizard.
+- [x] Dropped stale `#[allow(dead_code)]` on `index::Progress`.
+- [x] Delete orphaned `cache.sqlite` in `.git/git-archaeologist/` on
+      `repo::open` (silent — the cache lives in XDG data now).
 
 ## Killed (do not resurrect without a fresh case)
 

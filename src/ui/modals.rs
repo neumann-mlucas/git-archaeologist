@@ -28,33 +28,51 @@ pub fn render(f: &mut Frame, state: &AppState) {
             items,
             selected,
             cursor,
-        } => checklist(
-            f,
-            " Language filter — [space] toggle, [c] clear, [Enter] apply ",
-            items.to_vec(),
-            selected.iter().cloned().collect(),
-            *cursor,
-        ),
+            filter,
+        } => {
+            let (labels, ids): (Vec<String>, Vec<String>) = items
+                .iter()
+                .filter(|s| Modal::matches_filter(filter, s))
+                .map(|s| (s.clone(), s.clone()))
+                .unzip();
+            checklist_labeled(
+                f,
+                " Language filter — [space] toggle, [C] clear, [Enter] apply ",
+                labels,
+                ids,
+                selected.iter().cloned().collect(),
+                *cursor,
+                filter,
+            )
+        }
         Modal::Author {
             items,
             selected,
             cursor,
+            filter,
         } => {
-            let labels: Vec<String> = items
+            let visible: Vec<(String, String)> = items
                 .iter()
-                .map(|(_, n, e)| format!("{n} <{e}>"))
+                .filter_map(|(id, n, e)| {
+                    let label = format!("{n} <{e}>");
+                    if Modal::matches_filter(filter, &label) {
+                        Some((label, id.to_string()))
+                    } else {
+                        None
+                    }
+                })
                 .collect();
-            let ids: Vec<String> =
-                items.iter().map(|(id, _, _)| id.to_string()).collect();
+            let (labels, ids): (Vec<String>, Vec<String>) = visible.into_iter().unzip();
             let sel: Vec<String> =
                 selected.iter().map(|id| id.to_string()).collect();
             checklist_labeled(
                 f,
-                " Author filter — [space] toggle, [c] clear, [Enter] apply ",
+                " Author filter — [space] toggle, [C] clear, [Enter] apply ",
                 labels,
                 ids,
                 sel.into_iter().collect(),
                 *cursor,
+                filter,
             )
         }
         Modal::Help => render_help(f, state),
@@ -85,17 +103,6 @@ fn radio(f: &mut Frame, title: &str, options: Vec<String>, cursor: usize, curren
     f.render_stateful_widget(list, area, &mut ls);
 }
 
-fn checklist(
-    f: &mut Frame,
-    title: &str,
-    options: Vec<String>,
-    selected: Vec<String>,
-    cursor: usize,
-) {
-    let ids: Vec<String> = options.clone();
-    checklist_labeled(f, title, options, ids, selected.into_iter().collect(), cursor)
-}
-
 fn checklist_labeled(
     f: &mut Frame,
     title: &str,
@@ -103,9 +110,16 @@ fn checklist_labeled(
     ids: Vec<String>,
     selected: std::collections::HashSet<String>,
     cursor: usize,
+    filter: &str,
 ) {
     let area = centered_rect(60, 60, f.area());
     f.render_widget(Clear, area);
+
+    // Reserve one row at the bottom of the modal for the filter input.
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(area);
 
     let items: Vec<ListItem> = labels
         .iter()
@@ -125,7 +139,19 @@ fn checklist_labeled(
 
     let mut ls = ListState::default();
     ls.select(Some(cursor));
-    f.render_stateful_widget(list, area, &mut ls);
+    f.render_stateful_widget(list, inner[0], &mut ls);
+
+    let filter_title = if filter.is_empty() {
+        " filter (type to narrow, Backspace, Esc clears) "
+    } else {
+        " filter "
+    };
+    let filter_widget = Paragraph::new(Line::from(vec![
+        Span::styled(" / ", Style::default().fg(Color::Cyan)),
+        Span::raw(filter.to_string()),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title(filter_title));
+    f.render_widget(filter_widget, inner[1]);
 }
 
 fn render_help(f: &mut Frame, state: &AppState) {
@@ -155,6 +181,8 @@ fn render_help(f: &mut Frame, state: &AppState) {
         Line::from("   f            date range"),
         Line::from("   l            languages"),
         Line::from("   a            authors"),
+        Line::from("   , / .        pan date window left / right"),
+        Line::from("   - / =        zoom out / in"),
         Line::from(""),
         Line::from(" Repo "),
         Line::from("   r            force reindex"),

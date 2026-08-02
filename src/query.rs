@@ -115,12 +115,13 @@ pub fn series(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoint>> {
         (Lens::Activity, GroupBy::Module) => churn_series_by_module(conn, f)?,
         (Lens::Activity, GroupBy::Author) => churn_series_by_author(conn, f)?,
 
-        // Ownership lens is blame-backed and pending Slice 5 (blame cache).
-        // Return empty; the chart panel already handles "no data" gracefully.
-        (Lens::Ownership, _) => vec![],
+        // Ownership is blame-backed (v1 = snapshot of latest sampled sha, so
+        // the series is a single-bucket bar per author).
+        (Lens::Ownership, GroupBy::Author) => ownership_series_by_author(conn, f)?,
 
         // Guard branches — technically unreachable given the guard above.
         (Lens::Structure, GroupBy::Author) => vec![],
+        (Lens::Ownership, GroupBy::Language | GroupBy::Module) => vec![],
     };
 
     Ok(apply_view(raw, f))
@@ -294,6 +295,34 @@ fn churn_series_by_author(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPo
     fetch_series_with_int_group(conn, &sql, &params, &names)
 }
 
+fn ownership_series_by_author(
+    conn: &Connection,
+    f: &Filters,
+) -> Result<Vec<SeriesPoint>> {
+    // v1: blame is populated only for the latest sampled sha. Group by author,
+    // filter by path scope + author filter. All rows land in one bucket
+    // (the latest sampled bucket_key) so downstream views degrade to a single
+    // bar per author.
+    let scope_like = scope_like(&f.path_scope);
+    let (auth_where, auth_params) = in_clause_ints(&f.author_ids, "b.author_id");
+
+    let sql = format!(
+        "SELECT c.bucket_key, b.author_id, SUM(b.line_count)
+         FROM blame b
+         JOIN commits c ON c.sha = b.sha
+         WHERE b.path LIKE ?
+           {auth_where}
+         GROUP BY c.bucket_key, b.author_id
+         ORDER BY c.bucket_key"
+    );
+
+    let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(scope_like)];
+    params.extend(auth_params);
+
+    let names = author_names(conn)?;
+    fetch_series_with_int_group(conn, &sql, &params, &names)
+}
+
 fn churn_series_by_module(conn: &Connection, f: &Filters) -> Result<Vec<SeriesPoint>> {
     let (date_where, date_params) = date_where_clause(f);
     let scope_like = scope_like(&f.path_scope);
@@ -379,8 +408,6 @@ pub fn breakdown(conn: &Connection, f: &Filters) -> Result<Vec<BreakdownRow>> {
     Ok(rows)
 }
 
-// ─── subpaths (drill-down) ───────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CacheStats {
     pub commits: i64,
@@ -420,43 +447,6 @@ pub fn list_authors(conn: &Connection) -> Result<Vec<(i64, String, String)>> {
         ))
     })?;
     Ok(rows.collect::<duckdb::Result<_>>()?)
-}
-
-#[allow(dead_code)] // reserved for v1.1 path-picker modal
-pub fn subpaths(conn: &Connection, scope: &str) -> Result<Vec<String>> {
-    let scope_norm = normalize_scope(scope);
-    let like = format!("{scope_norm}%");
-
-    let latest_sha: Option<String> = conn
-        .query_row(
-            "SELECT sha FROM commits WHERE is_sampled = TRUE ORDER BY committed_at DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
-
-    let latest_sha = match latest_sha {
-        Some(s) => s,
-        None => return Ok(vec![]),
-    };
-
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT path FROM file_stats WHERE sha = ? AND path LIKE ?",
-    )?;
-    let mut rows = stmt.query([&latest_sha as &dyn ToSql, &like as &dyn ToSql])?;
-
-    let mut seen: BTreeMap<String, ()> = BTreeMap::new();
-    let scope_len = scope_norm.len();
-    while let Some(row) = rows.next()? {
-        let path: String = row.get(0)?;
-        if let Some(rest) = path.get(scope_len..) {
-            let seg = rest.split('/').next().unwrap_or("");
-            if !seg.is_empty() {
-                seen.insert(seg.to_string(), ());
-            }
-        }
-    }
-    Ok(seen.into_keys().collect())
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
@@ -642,4 +632,145 @@ fn running_sum_per_group(mut points: Vec<SeriesPoint>) -> Vec<SeriesPoint> {
         p.value = *acc;
     }
     points
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sp(bucket: i64, group: &str, value: i64) -> SeriesPoint {
+        SeriesPoint {
+            bucket,
+            group: group.to_string(),
+            value,
+        }
+    }
+
+    fn filters(lens: Lens, view: View) -> Filters {
+        Filters {
+            lens,
+            view,
+            ..Filters::default()
+        }
+    }
+
+    fn sorted(mut v: Vec<SeriesPoint>) -> Vec<(i64, String, i64)> {
+        v.sort_by(|a, b| a.group.cmp(&b.group).then(a.bucket.cmp(&b.bucket)));
+        v.into_iter().map(|p| (p.bucket, p.group, p.value)).collect()
+    }
+
+    #[test]
+    fn structure_cumulative_is_identity() {
+        let input = vec![sp(1, "Rust", 100), sp(2, "Rust", 120)];
+        let out = apply_view(input.clone(), &filters(Lens::Structure, View::Cumulative));
+        assert_eq!(sorted(out), sorted(input));
+    }
+
+    #[test]
+    fn structure_delta_subtracts_prev_snapshot() {
+        // Rust: 100 → 120 → 130. Deltas: 100, 20, 10.
+        let input = vec![
+            sp(1, "Rust", 100),
+            sp(2, "Rust", 120),
+            sp(3, "Rust", 130),
+        ];
+        let out = apply_view(input, &filters(Lens::Structure, View::Delta));
+        assert_eq!(
+            sorted(out),
+            vec![
+                (1, "Rust".into(), 100),
+                (2, "Rust".into(), 20),
+                (3, "Rust".into(), 10),
+            ]
+        );
+    }
+
+    #[test]
+    fn structure_delta_multi_group_dense_fill_across_all_observed_buckets() {
+        // Buckets observed: {1, 2, 3}. Group "A" only at b1 and b3;
+        // group "B" only at b2. Dense-fill inserts zeros so the delta at
+        // each bucket is (this - prev) with prev implicitly 0 on first sight.
+        let input = vec![sp(1, "A", 10), sp(2, "B", 20), sp(3, "A", 30)];
+        let out = apply_view(input, &filters(Lens::Structure, View::Delta));
+        assert_eq!(
+            sorted(out),
+            vec![
+                // A: 10, 0-10=-10, 30-0=30
+                (1, "A".into(), 10),
+                (2, "A".into(), -10),
+                (3, "A".into(), 30),
+                // B: 0, 20, 0-20=-20
+                (1, "B".into(), 0),
+                (2, "B".into(), 20),
+                (3, "B".into(), -20),
+            ]
+        );
+    }
+
+    #[test]
+    fn activity_delta_is_identity() {
+        let input = vec![sp(1, "Rust", 10), sp(2, "Rust", 20)];
+        let out = apply_view(input.clone(), &filters(Lens::Activity, View::Delta));
+        assert_eq!(sorted(out), sorted(input));
+    }
+
+    #[test]
+    fn activity_cumulative_running_sum_per_group() {
+        // Rust: 10, 20, 30 → 10, 30, 60. Python: 5, 5 → 5, 10.
+        let input = vec![
+            sp(1, "Rust", 10),
+            sp(2, "Rust", 20),
+            sp(3, "Rust", 30),
+            sp(1, "Python", 5),
+            sp(2, "Python", 5),
+        ];
+        let out = apply_view(input, &filters(Lens::Activity, View::Cumulative));
+        assert_eq!(
+            sorted(out),
+            vec![
+                (1, "Python".into(), 5),
+                (2, "Python".into(), 10),
+                (1, "Rust".into(), 10),
+                (2, "Rust".into(), 30),
+                (3, "Rust".into(), 60),
+            ]
+        );
+    }
+
+    #[test]
+    fn ownership_is_identity_regardless_of_view() {
+        let input = vec![sp(1, "alice", 5)];
+        let out = apply_view(input.clone(), &filters(Lens::Ownership, View::Delta));
+        assert_eq!(sorted(out), sorted(input.clone()));
+        let out = apply_view(input.clone(), &filters(Lens::Ownership, View::Cumulative));
+        assert_eq!(sorted(out), sorted(input));
+    }
+
+    #[test]
+    fn module_key_root_when_no_segments() {
+        assert_eq!(module_key("Cargo.toml", "", 1), "Cargo.toml");
+        // depth 2 collapses to whatever is present up to depth
+        assert_eq!(module_key("src/main.rs", "", 1), "src");
+        assert_eq!(module_key("src/main.rs", "", 2), "src/main.rs");
+        assert_eq!(module_key("src/foo/bar.rs", "src", 1), "foo");
+        assert_eq!(module_key("src/foo/bar.rs", "src/", 2), "foo/bar.rs");
+    }
+
+    #[test]
+    fn normalize_scope_variants() {
+        assert_eq!(normalize_scope(""), "");
+        assert_eq!(normalize_scope("/"), "");
+        assert_eq!(normalize_scope("src"), "src/");
+        assert_eq!(normalize_scope("/src/"), "src/");
+        assert_eq!(normalize_scope("src/foo"), "src/foo/");
+    }
+
+    #[test]
+    fn valid_groups_per_lens() {
+        assert!(Lens::Structure.valid_groups().contains(&GroupBy::Language));
+        assert!(Lens::Structure.valid_groups().contains(&GroupBy::Module));
+        assert!(!Lens::Structure.valid_groups().contains(&GroupBy::Author));
+        assert!(Lens::Activity.valid_groups().contains(&GroupBy::Author));
+        assert_eq!(Lens::Ownership.valid_groups(), &[GroupBy::Author]);
+    }
 }

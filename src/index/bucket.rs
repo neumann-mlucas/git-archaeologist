@@ -57,3 +57,69 @@ pub fn bucket_key(ts: OffsetDateTime, size: BucketSize) -> i64 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    #[test]
+    fn commit_bucket_is_unix_seconds() {
+        let ts = datetime!(2025-03-15 12:00:00 UTC);
+        assert_eq!(
+            bucket_key(ts, BucketSize::Commit),
+            ts.unix_timestamp()
+        );
+    }
+
+    #[test]
+    fn day_bucket_is_yyyymmdd() {
+        let ts = datetime!(2025-03-15 23:59:59 UTC);
+        assert_eq!(bucket_key(ts, BucketSize::Day), 20_250_315);
+    }
+
+    #[test]
+    fn month_bucket_is_yyyymm() {
+        let ts = datetime!(2025-03-15 00:00:00 UTC);
+        assert_eq!(bucket_key(ts, BucketSize::Month), 202_503);
+    }
+
+    #[test]
+    fn week_bucket_uses_iso_year_for_dec_jan_wrap() {
+        // 2025-12-29 is Monday, ISO week 2026-W01. Calendar year 2025 would
+        // sort wrong across the Dec/Jan boundary.
+        let ts = datetime!(2025-12-29 12:00:00 UTC);
+        assert_eq!(bucket_key(ts, BucketSize::Week), 2026 * 100 + 1);
+
+        // 2024-12-31 is Tuesday of ISO 2025-W01.
+        let ts = datetime!(2024-12-31 12:00:00 UTC);
+        assert_eq!(bucket_key(ts, BucketSize::Week), 2025 * 100 + 1);
+    }
+
+    #[test]
+    fn week_bucket_mid_year() {
+        // 2025-03-15 is Saturday of ISO 2025-W11.
+        let ts = datetime!(2025-03-15 12:00:00 UTC);
+        assert_eq!(bucket_key(ts, BucketSize::Week), 2025 * 100 + 11);
+    }
+
+    #[test]
+    fn auto_thresholds() {
+        assert_eq!(auto(0), BucketSize::Commit);
+        assert_eq!(auto(499), BucketSize::Commit);
+        assert_eq!(auto(500), BucketSize::Day);
+        assert_eq!(auto(4_999), BucketSize::Day);
+        assert_eq!(auto(5_000), BucketSize::Week);
+        assert_eq!(auto(49_999), BucketSize::Week);
+        assert_eq!(auto(50_000), BucketSize::Month);
+    }
+
+    #[test]
+    fn parse_size() {
+        assert_eq!(BucketSize::parse("Day"), Some(BucketSize::Day));
+        assert_eq!(BucketSize::parse("week"), Some(BucketSize::Week));
+        assert_eq!(BucketSize::parse("COMMIT"), Some(BucketSize::Commit));
+        assert_eq!(BucketSize::parse("month"), Some(BucketSize::Month));
+        assert_eq!(BucketSize::parse("year"), None);
+    }
+}

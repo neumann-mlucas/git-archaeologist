@@ -56,13 +56,25 @@ pub enum Modal {
         items: Vec<String>,
         selected: HashSet<String>,
         cursor: usize,
+        filter: String,
     },
     Author {
         items: Vec<(i64, String, String)>,
         selected: HashSet<i64>,
         cursor: usize,
+        filter: String,
     },
     Help,
+}
+
+impl Modal {
+    /// Case-insensitive substring match on `label`.
+    pub fn matches_filter(filter: &str, label: &str) -> bool {
+        if filter.is_empty() {
+            return true;
+        }
+        label.to_lowercase().contains(&filter.to_lowercase())
+    }
 }
 
 pub const BUCKET_CHOICES: &[(BucketSize, &str)] = &[
@@ -209,6 +221,13 @@ fn run_index_with_splash(
                     sampled = s;
                 }
                 Ok(index::Progress::Commit { done: d, total: t }) => {
+                    done = d;
+                    total = t;
+                }
+                Ok(index::Progress::Blame { done: d, total: t }) => {
+                    // Blame is a distinct phase after the commit walk. Overload
+                    // the same bar — the "sampled=N" label still holds; we
+                    // just render sub-progress inside blame.
                     done = d;
                     total = t;
                 }
@@ -392,9 +411,6 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             if !valid.contains(&state.filters.group_by) {
                 state.filters.group_by = valid[0];
             }
-            if state.filters.lens == Lens::Ownership {
-                set_status(state, "ownership lens: blame cache pending (Slice 5)");
-            }
             state.selected_row = 0;
             state.dirty = true;
         }
@@ -422,6 +438,7 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 items,
                 selected,
                 cursor: 0,
+                filter: String::new(),
             });
         }
         KeyCode::Char('a') => {
@@ -431,6 +448,7 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
                 items,
                 selected,
                 cursor: 0,
+                filter: String::new(),
             });
         }
         KeyCode::Char('r') => {
@@ -449,6 +467,22 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             apply_sort(&mut state.breakdown, state.sort_col);
             state.selected_row = 0;
         }
+        KeyCode::Char(',') => {
+            pan_window(&mut state.filters, -0.25);
+            state.dirty = true;
+        }
+        KeyCode::Char('.') => {
+            pan_window(&mut state.filters, 0.25);
+            state.dirty = true;
+        }
+        KeyCode::Char('-') => {
+            zoom_window(&mut state.filters, 2.0);
+            state.dirty = true;
+        }
+        KeyCode::Char('=') | KeyCode::Char('+') => {
+            zoom_window(&mut state.filters, 0.5);
+            state.dirty = true;
+        }
         _ => {}
     }
     Ok(())
@@ -457,15 +491,30 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> Result<()> {
 // ─── modal-context keys ───────────────────────────────────────────────────
 
 fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
-    // Escape / q always closes the modal.
-    if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
-        state.modal = None;
-        return Ok(());
-    }
-
+    // Esc always closes (except when it clears an active filter — see below).
+    // 'q' only closes non-typing modals so it doesn't get eaten mid-filter.
     let Some(modal) = state.modal.as_mut() else {
         return Ok(());
     };
+    match (code, &*modal) {
+        (KeyCode::Esc, Modal::Language { filter, .. } | Modal::Author { filter, .. })
+            if !filter.is_empty() =>
+        {
+            // Fall through to per-modal handlers, which pop the filter.
+        }
+        (KeyCode::Esc, _) => {
+            state.modal = None;
+            return Ok(());
+        }
+        (
+            KeyCode::Char('q'),
+            Modal::Bucket { .. } | Modal::DateRange { .. } | Modal::Help,
+        ) => {
+            state.modal = None;
+            return Ok(());
+        }
+        _ => {}
+    }
 
     match modal {
         Modal::Bucket { cursor } => match code {
@@ -504,54 +553,104 @@ fn handle_modal_key(state: &mut AppState, code: KeyCode) -> Result<()> {
             items,
             selected,
             cursor,
-        } => match code {
-            KeyCode::Down => *cursor = (*cursor + 1).min(items.len().saturating_sub(1)),
-            KeyCode::Up => *cursor = cursor.saturating_sub(1),
-            KeyCode::Char(' ') => {
-                if let Some(item) = items.get(*cursor) {
-                    if selected.contains(item) {
-                        selected.remove(item);
-                    } else {
-                        selected.insert(item.clone());
+            filter,
+        } => {
+            let visible: Vec<usize> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| Modal::matches_filter(filter, s))
+                .map(|(i, _)| i)
+                .collect();
+            match code {
+                KeyCode::Down => {
+                    *cursor = (*cursor + 1).min(visible.len().saturating_sub(1))
+                }
+                KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                KeyCode::Char(' ') => {
+                    if let Some(&idx) = visible.get(*cursor) {
+                        let item = &items[idx];
+                        if selected.contains(item) {
+                            selected.remove(item);
+                        } else {
+                            selected.insert(item.clone());
+                        }
                     }
                 }
+                KeyCode::Char('C') => selected.clear(),
+                KeyCode::Backspace => {
+                    filter.pop();
+                    *cursor = 0;
+                }
+                KeyCode::Esc => {
+                    filter.clear();
+                    *cursor = 0;
+                }
+                KeyCode::Char(c) if !c.is_ascii_uppercase() && !c.is_whitespace() => {
+                    filter.push(c);
+                    *cursor = 0;
+                }
+                KeyCode::Enter => {
+                    state.filters.languages = selected.iter().cloned().collect();
+                    state.filters.languages.sort();
+                    state.modal = None;
+                    state.selected_row = 0;
+                    state.dirty = true;
+                }
+                _ => {}
             }
-            KeyCode::Char('c') => selected.clear(),
-            KeyCode::Enter => {
-                state.filters.languages = selected.iter().cloned().collect();
-                state.filters.languages.sort();
-                state.modal = None;
-                state.selected_row = 0;
-                state.dirty = true;
-            }
-            _ => {}
-        },
+        }
         Modal::Author {
             items,
             selected,
             cursor,
-        } => match code {
-            KeyCode::Down => *cursor = (*cursor + 1).min(items.len().saturating_sub(1)),
-            KeyCode::Up => *cursor = cursor.saturating_sub(1),
-            KeyCode::Char(' ') => {
-                if let Some((id, _, _)) = items.get(*cursor) {
-                    if selected.contains(id) {
-                        selected.remove(id);
-                    } else {
-                        selected.insert(*id);
+            filter,
+        } => {
+            let visible: Vec<usize> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, n, e))| {
+                    Modal::matches_filter(filter, &format!("{n} <{e}>"))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            match code {
+                KeyCode::Down => {
+                    *cursor = (*cursor + 1).min(visible.len().saturating_sub(1))
+                }
+                KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                KeyCode::Char(' ') => {
+                    if let Some(&idx) = visible.get(*cursor) {
+                        let (id, _, _) = &items[idx];
+                        if selected.contains(id) {
+                            selected.remove(id);
+                        } else {
+                            selected.insert(*id);
+                        }
                     }
                 }
+                KeyCode::Char('C') => selected.clear(),
+                KeyCode::Backspace => {
+                    filter.pop();
+                    *cursor = 0;
+                }
+                KeyCode::Esc => {
+                    filter.clear();
+                    *cursor = 0;
+                }
+                KeyCode::Char(c) if !c.is_ascii_uppercase() && !c.is_whitespace() => {
+                    filter.push(c);
+                    *cursor = 0;
+                }
+                KeyCode::Enter => {
+                    state.filters.author_ids = selected.iter().copied().collect();
+                    state.filters.author_ids.sort();
+                    state.modal = None;
+                    state.selected_row = 0;
+                    state.dirty = true;
+                }
+                _ => {}
             }
-            KeyCode::Char('c') => selected.clear(),
-            KeyCode::Enter => {
-                state.filters.author_ids = selected.iter().copied().collect();
-                state.filters.author_ids.sort();
-                state.modal = None;
-                state.selected_row = 0;
-                state.dirty = true;
-            }
-            _ => {}
-        },
+        }
         Modal::Help => {}
     }
     Ok(())
@@ -569,6 +668,39 @@ fn apply_date_preset(filters: &mut Filters, days: Option<i64>) {
             filters.to = Some(now);
         }
     }
+}
+
+/// Ensure a bounded date window so pan/zoom has something to move. Defaults
+/// to last year when the window is fully open.
+fn ensure_window(filters: &mut Filters) {
+    if filters.from.is_none() || filters.to.is_none() {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        filters.to = Some(now);
+        filters.from = Some(now - 365 * 86_400);
+    }
+}
+
+/// Shift the current window by `frac` of its span (negative = earlier).
+pub fn pan_window(filters: &mut Filters, frac: f64) {
+    ensure_window(filters);
+    let from = filters.from.unwrap();
+    let to = filters.to.unwrap();
+    let span = (to - from).max(1);
+    let delta = (span as f64 * frac) as i64;
+    filters.from = Some(from + delta);
+    filters.to = Some(to + delta);
+}
+
+/// Scale the window around its midpoint. `factor > 1` widens, `< 1` narrows.
+pub fn zoom_window(filters: &mut Filters, factor: f64) {
+    ensure_window(filters);
+    let from = filters.from.unwrap();
+    let to = filters.to.unwrap();
+    let mid = (from + to) / 2;
+    let half = ((to - from).max(2) as f64 / 2.0 * factor) as i64;
+    let half = half.max(1); // never collapse to zero span
+    filters.from = Some(mid - half);
+    filters.to = Some(mid + half);
 }
 
 fn drill_in(state: &mut AppState) {
@@ -601,4 +733,65 @@ fn drill_out(state: &mut AppState) {
     }
     state.selected_row = 0;
     state.dirty = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn win(from: i64, to: i64) -> Filters {
+        Filters {
+            from: Some(from),
+            to: Some(to),
+            ..Filters::default()
+        }
+    }
+
+    #[test]
+    fn pan_shifts_window_left() {
+        let mut f = win(0, 100);
+        pan_window(&mut f, -0.25);
+        assert_eq!(f.from, Some(-25));
+        assert_eq!(f.to, Some(75));
+    }
+
+    #[test]
+    fn pan_shifts_window_right() {
+        let mut f = win(0, 100);
+        pan_window(&mut f, 0.5);
+        assert_eq!(f.from, Some(50));
+        assert_eq!(f.to, Some(150));
+    }
+
+    #[test]
+    fn zoom_in_halves_span() {
+        let mut f = win(0, 100);
+        zoom_window(&mut f, 0.5);
+        assert_eq!(f.from, Some(25));
+        assert_eq!(f.to, Some(75));
+    }
+
+    #[test]
+    fn zoom_out_doubles_span() {
+        let mut f = win(0, 100);
+        zoom_window(&mut f, 2.0);
+        assert_eq!(f.from, Some(-50));
+        assert_eq!(f.to, Some(150));
+    }
+
+    #[test]
+    fn zoom_never_collapses_to_zero() {
+        let mut f = win(50, 52);
+        zoom_window(&mut f, 0.0001);
+        let span = f.to.unwrap() - f.from.unwrap();
+        assert!(span >= 2, "span={span} must stay >= 2");
+    }
+
+    #[test]
+    fn pan_seeds_window_when_none() {
+        let mut f = Filters::default();
+        assert!(f.from.is_none());
+        pan_window(&mut f, 0.25);
+        assert!(f.from.is_some() && f.to.is_some());
+    }
 }
