@@ -219,33 +219,68 @@ subcommand + assertions) in ~100s on a dev box.
       cut from the dep tree in Phase 0. Re-add as `have_tokei()`
       conditional if a real user needs it.
 
-### Indexer perf — first pass ✅
+### Indexer perf ✅
 
-Landed on the Appender path. Move every write-heavy table (`commits`,
-`commit_parents`, `commit_trailers`, `hunks`, `file_churn`,
-`file_stats`, `funcs`) to `Connection::appender(...)`. Removed
-`Connection::transaction()` (needs `&mut`, blocks appender borrow) and
-the tx-chunk bookkeeping. Cost: dropped `ON CONFLICT DO UPDATE` — safe
-because `wipe_data()` runs before `force_full` and the incremental
-path filters SHAs via `already: HashSet<String>`, so we never insert a
-duplicate.
+Full journey on ratatui (2589 commits reached via all-refs walk,
+8-core dev box):
 
-Numbers on ratatui (2589 commits reached via all-refs walk):
+| Path                                            | Wall     | Peak RSS |
+|-------------------------------------------------|----------|----------|
+| pre-fix (single long tx + prepared stmts)       | OOM      | 4-8 GB   |
+| Appender + 50-chunk tx                          | ~25 min  | 1.5 GB   |
+| **Appender everywhere** (per SPEC §Data model)  | 94 s     | < 500 MB |
+| + rayon churn walk (per-worker `gix::open`)     | 92 s     | < 500 MB |
+| + rayon cohort fold + line_births Appender      | 73 s     | < 500 MB |
+| + two-phase parallel treesitter (unique blobs)  | **41 s** | < 500 MB |
 
-| Path                        | Wall     | Peak RSS |
-|-----------------------------|----------|----------|
-| pre-fix (single long tx)    | OOM at 4-8 GB | 4-8 GB |
-| Appender + 50-chunk tx      | ~25 min, degrading rate | 1.5 GB |
-| **Appender everywhere**     | **~94 s, flat 42/s**  | **< 500 MB** |
+Wins landed:
+- Every write-heavy table (`commits`, `commit_parents`,
+  `commit_trailers`, `hunks`, `file_churn`, `file_stats`, `funcs`,
+  `line_births`) uses `Connection::appender(...)`. Dropped ON CONFLICT
+  DO UPDATE — safe because `wipe_data()` runs on force_full and
+  `already: HashSet<String>` dedupes the incremental path.
+- `churn::batch_all` — serial (sha, parent_id) collection then
+  `par_iter().map_init(|| gix::open(git_dir), ...)` for the diff work.
+  gix::Repository is `!Sync` but reopening the same `.git/` per
+  worker is fine per SPEC.
+- `cohort::fold_and_materialize` — `into_par_iter` over canonical
+  paths (files are independent post-rename-alias).
+- Two-phase parallel treesitter — serial tree walk collects the
+  unique blob-id set (cheap, no blob I/O), then par_iter parses each
+  blob at most once. Prior per-sha parallel with per-worker
+  BlobCache regressed by 60 s because it killed cross-commit dedup;
+  this design keeps dedup and adds parallelism.
 
-Still on the v1.x list:
+### Query perf ✅
 
-- Rayon-parallelize the churn walk (SPEC §Indexing Phase 1). Serial
-  gix::blob_diff is now the dominant cost.
+Same benchmark repo, warm cache:
+
+| query          | before  | after  | SPEC target |
+|----------------|---------|--------|-------------|
+| cohort         | 2400 ms | 530 ms | 500 ms      |
+| survival       | 250 ms  | 120 ms | 500 ms      |
+| burndown lang  | 30 ms   |  20 ms | 500 ms      |
+| burndown author| 30 ms   |  20 ms | 500 ms      |
+| coupling       | 30 ms   |  20 ms | 500 ms      |
+| churn module   | 25 ms   |  20 ms | 500 ms      |
+| classify       | 110 ms  | 100 ms | 500 ms      |
+| age            | 120 ms  | 110 ms | 500 ms      |
+| hotspot rust   | 25 ms   |  22 ms | 500 ms      |
+
+Cohort was scanning 800k `line_births` rows through a per-bucket range
+join; rewrote to pre-aggregate one row per cohort then cross-join with
+the bucket universe.
+
+### Still open (v1.x)
+
+- SPEC perf targets: 10k-commit repo in 90 s (we linearly scale to
+  ~160 s), cache size < 200 MB for 10k (linearly ~580 MB). Meeting
+  those needs more aggressive dedup + streaming churn iterator + a
+  smaller-per-row hunk representation.
 - Stream `churn::batch_all` iterator instead of collecting a full
   `HashMap<String, CommitDiff>` up front (peak RSS win on big repos).
-- Bring cohort/survival queries under the SPEC 500 ms bar
-  (materialized view for the (bucket, cohort) grid).
+- Cohort 530 ms is right at the SPEC 500 ms bar — either accept or
+  materialize the (bucket, cohort) grid at index time.
 
 ### Tier 3 — mid & mid-large bench (`--features bench-large`, nightly)
 
