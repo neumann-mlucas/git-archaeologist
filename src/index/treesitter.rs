@@ -1,7 +1,8 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use tree_sitter::{Language, Node, Parser, Tree};
 
 use crate::repo::Repo;
@@ -219,6 +220,130 @@ pub fn snapshot(
     registry: &mut LangRegistry,
 ) -> Result<Vec<FileSnapshot>> {
     snapshot_with(&repo.git, sha, cache, registry)
+}
+
+/// Two-phase parallel treesitter for a set of sampled commits:
+///
+///   1. Serial tree walk per sha collects `(path, oid)` pairs and the
+///      unique blob-id set. Cheap: no blob I/O, just tree traversal +
+///      the extension registry.
+///   2. Parallel parse of the unique blob set. Each rayon worker gets
+///      its own `gix::Repository` + `LangRegistry` (both `!Sync`).
+///      Because we parse each blob at most once, per-worker state is
+///      just a scratch buffer — no lost dedup.
+///   3. Assembly per sha reads from the parse map and applies the
+///      path-based test-marker fallback.
+///
+/// This is a straight win over the in-loop serial `snapshot()` when
+/// the repo has many sampled commits sharing files (the common case).
+pub fn batch_sampled(
+    repo: &Repo,
+    sampled_shas: &[String],
+) -> HashMap<String, Vec<FileSnapshot>> {
+    // Phase 1: enumerate sampled trees. Serial — tree walks touch loose
+    // objects, which gix caches per-repo; parallel here would fight the
+    // cache.
+    let mut registry = LangRegistry::new();
+    let mut per_sha: HashMap<String, Vec<(String, gix::ObjectId)>> =
+        HashMap::with_capacity(sampled_shas.len());
+    let mut unique: HashSet<gix::ObjectId> = HashSet::new();
+
+    for sha in sampled_shas {
+        let entries = match enumerate_tree(&repo.git, sha, &mut registry) {
+            Some(v) => v,
+            None => continue,
+        };
+        for (_, oid) in &entries {
+            unique.insert(*oid);
+        }
+        per_sha.insert(sha.clone(), entries);
+    }
+
+    // Phase 2: parse each unique blob in parallel.
+    let git_dir: PathBuf = repo.git.path().to_path_buf();
+    let unique_vec: Vec<gix::ObjectId> = unique.into_iter().collect();
+    let parse_pairs: Vec<(gix::ObjectId, Option<CachedParse>)> = unique_vec
+        .par_iter()
+        .map_init(
+            || {
+                (
+                    gix::open(&git_dir).expect("open per-worker repo"),
+                    LangRegistry::new(),
+                )
+            },
+            |(git, reg), oid| {
+                // A blob may be classifiable under multiple paths (rare);
+                // pick any path from a commit that has it. Language spec
+                // is by extension so this is stable across the aliases.
+                let sample_path = per_sha
+                    .values()
+                    .find_map(|entries| {
+                        entries.iter().find(|(_, o)| o == oid).map(|(p, _)| p.clone())
+                    })
+                    .unwrap_or_default();
+                let parsed = parse_blob(git, *oid, &sample_path, reg);
+                (*oid, parsed)
+            },
+        )
+        .collect();
+    let parse_map: HashMap<gix::ObjectId, Option<CachedParse>> = parse_pairs.into_iter().collect();
+
+    // Phase 3: assemble per-sha FileSnapshot lists from the parse map.
+    per_sha
+        .into_iter()
+        .map(|(sha, entries)| {
+            let files = entries
+                .into_iter()
+                .filter_map(|(path, oid)| {
+                    let c = parse_map.get(&oid)?.clone()?;
+                    let mut funcs = c.funcs;
+                    if is_test_path(&path) {
+                        for f in funcs.iter_mut() {
+                            f.kind = "test".to_string();
+                        }
+                    }
+                    Some(FileSnapshot {
+                        stat: FileStat {
+                            path,
+                            language: c.language,
+                            code: c.code,
+                            comments: c.comments,
+                            blanks: c.blanks,
+                        },
+                        funcs,
+                    })
+                })
+                .collect();
+            (sha, files)
+        })
+        .collect()
+}
+
+/// Walk a commit's tree, return every blob path + its ObjectId, filtered
+/// to files the registry can classify. Serial; returns `None` on any
+/// unrecoverable gix error (bad sha, missing tree, etc.).
+fn enumerate_tree(
+    git: &gix::Repository,
+    sha: &str,
+    registry: &mut LangRegistry,
+) -> Option<Vec<(String, gix::ObjectId)>> {
+    let oid: gix::ObjectId = sha.parse().ok()?;
+    let commit = git.find_object(oid).ok()?.try_into_commit().ok()?;
+    let tree = commit.tree().ok()?;
+    let entries = tree.traverse().breadthfirst.files().ok()?;
+
+    let mut out: Vec<(String, gix::ObjectId)> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !entry.mode.is_blob() {
+            continue;
+        }
+        let path_str = entry.filepath.to_string();
+        if registry.spec_for(&path_str).is_none() {
+            continue;
+        }
+        out.push((path_str, entry.oid));
+    }
+    Some(out)
 }
 
 /// Same as [`snapshot`], but takes a raw `gix::Repository` so a rayon

@@ -94,12 +94,18 @@ pub fn run(
 
     let churn_map = churn::batch_all(repo).unwrap_or_default();
 
-    // Serial treesitter with a shared BlobCache — on real repos the same
-    // blob appears in many consecutive sampled commits, so cross-commit
-    // dedup is a bigger win than per-commit parallelism (measured 30s
-    // slower when parallelized with per-worker caches).
-    let mut blob_cache = treesitter::BlobCache::default();
-    let mut lang_registry = treesitter::LangRegistry::new();
+    // Two-phase parallel treesitter: serial tree walk collects a unique
+    // blob set (no dedup loss), then rayon-parses each blob once. Prior
+    // per-sha-parallel design killed the cross-commit BlobCache and cost
+    // ~60s on ratatui; this design gets the parallelism without the
+    // dedup regression.
+    let sampled_shas: Vec<String> = all_commits
+        .iter()
+        .zip(assignments.iter())
+        .filter(|(_, plan)| plan.is_sampled)
+        .map(|(commit, _)| commit.sha.clone())
+        .collect();
+    let snapshot_map = treesitter::batch_sampled(repo, &sampled_shas);
 
     // Flush cadence: how many commits between BEGIN/COMMIT chunk
     // boundaries + Appender flushes. Trade-off:
@@ -218,13 +224,8 @@ pub fn run(
         }
 
         if plan.is_sampled {
-            if let Ok(files) = treesitter::snapshot(
-                repo,
-                &commit.sha,
-                &mut blob_cache,
-                &mut lang_registry,
-            ) {
-                for f in &files {
+            if let Some(files) = snapshot_map.get(&commit.sha) {
+                for f in files {
                     file_stats_app.append_row(params![
                         commit.sha,
                         f.stat.path,
