@@ -404,22 +404,50 @@ pub fn cohort(cache: &Cache, filters: &Filters) -> Result<Table> {
     }
     let cohort_where = where_parts.join(" AND ");
 
+    // Skip the commits join when there's no date filter — otherwise
+    // we drag 800k line_births rows through a join that filters nothing.
+    let has_date_filter = filters.from.is_some() || filters.to.is_some();
+    let filtered_lb_sql = if has_date_filter {
+        format!(
+            "SELECT lb.birth_bucket
+             FROM   line_births lb
+             JOIN   commits c_birth ON c_birth.sha = lb.birth_sha
+             WHERE  {cohort_where} {path_filter}"
+        )
+    } else {
+        format!(
+            "SELECT lb.birth_bucket
+             FROM   line_births lb
+             WHERE  1=1 {path_filter}"
+        )
+    };
+
     let sql = format!(
-        // For every current line, expand it against every "as-of" bucket
-        // that exists in the commits table. A line is alive at bucket B
-        // iff birth_bucket <= B.
-        "WITH buckets AS (
-             SELECT DISTINCT bucket_key AS bucket FROM commits WHERE is_sampled = TRUE
+        // `line_births` only holds surviving lines at HEAD, so a line
+        // with birth_bucket X is alive at every bucket B >= X. Pre-
+        // aggregate to (cohort, alive) — one row per cohort, then cross
+        // join with the bucket universe. Was: 800k×N range join +
+        // GROUP BY at the end (~2.4 s on ratatui). Is: 100×100 cross
+        // join (< 200 ms).
+        "WITH filtered_lb AS (
+             {filtered_lb_sql}
+         ),
+         per_cohort AS (
+             SELECT birth_bucket AS cohort, COUNT(*) AS alive
+             FROM   filtered_lb
+             GROUP  BY birth_bucket
+         ),
+         buckets AS (
+             SELECT DISTINCT bucket_key AS bucket
+             FROM   commits
+             WHERE  is_sampled = TRUE
          )
-         SELECT b.bucket                       AS bucket,
-                lb.birth_bucket                AS cohort,
-                COUNT(*)                       AS alive_lines
-         FROM   line_births lb
-         JOIN   commits c_birth ON c_birth.sha = lb.birth_sha
-         JOIN   buckets b       ON lb.birth_bucket <= b.bucket
-         WHERE  {cohort_where} {path_filter}
-         GROUP  BY b.bucket, lb.birth_bucket
-         ORDER  BY b.bucket, lb.birth_bucket",
+         SELECT b.bucket        AS bucket,
+                pc.cohort       AS cohort,
+                pc.alive        AS alive_lines
+         FROM   buckets b
+         JOIN   per_cohort pc ON pc.cohort <= b.bucket
+         ORDER  BY b.bucket, pc.cohort",
     );
     run_sql(cache, &sql)
 }
