@@ -218,9 +218,19 @@ pub fn snapshot(
     cache: &mut BlobCache,
     registry: &mut LangRegistry,
 ) -> Result<Vec<FileSnapshot>> {
+    snapshot_with(&repo.git, sha, cache, registry)
+}
+
+/// Same as [`snapshot`], but takes a raw `gix::Repository` so a rayon
+/// worker with its own per-thread `gix::open(...)` handle can call it.
+pub fn snapshot_with(
+    git: &gix::Repository,
+    sha: &str,
+    cache: &mut BlobCache,
+    registry: &mut LangRegistry,
+) -> Result<Vec<FileSnapshot>> {
     let oid: gix::ObjectId = sha.parse().context("parsing commit sha")?;
-    let commit = repo
-        .git
+    let commit = git
         .find_object(oid)
         .context("finding commit object")?
         .try_into_commit()
@@ -249,7 +259,7 @@ pub fn snapshot(
         let cached = match cache.entries.get(&entry.oid) {
             Some(v) => v.clone(),
             None => {
-                let parsed = parse_blob(repo, entry.oid, &path_str, registry);
+                let parsed = parse_blob(git, entry.oid, &path_str, registry);
                 cache.entries.insert(entry.oid, parsed.clone());
                 parsed
             }
@@ -282,12 +292,12 @@ pub fn snapshot(
 }
 
 fn parse_blob(
-    repo: &Repo,
+    git: &gix::Repository,
     oid: gix::ObjectId,
     path: &str,
     registry: &mut LangRegistry,
 ) -> Option<CachedParse> {
-    let blob = repo.git.find_blob(oid).ok()?;
+    let blob = git.find_blob(oid).ok()?;
     if blob.data.len() > MAX_BLOB_BYTES {
         return None;
     }

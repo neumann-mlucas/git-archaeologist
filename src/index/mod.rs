@@ -94,6 +94,10 @@ pub fn run(
 
     let churn_map = churn::batch_all(repo).unwrap_or_default();
 
+    // Serial treesitter with a shared BlobCache — on real repos the same
+    // blob appears in many consecutive sampled commits, so cross-commit
+    // dedup is a bigger win than per-commit parallelism (measured 30s
+    // slower when parallelized with per-worker caches).
     let mut blob_cache = treesitter::BlobCache::default();
     let mut lang_registry = treesitter::LangRegistry::new();
 
