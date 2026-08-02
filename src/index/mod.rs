@@ -92,7 +92,7 @@ pub fn run(
     let cfg = crate::config::load().context("loading user config for aliases")?;
     let mut resolver = AuthorResolver::new(repo, &cfg.aliases);
 
-    let churn_map = churn::batch_all(repo).unwrap_or_default();
+    let mut churn_map = churn::batch_all(repo).unwrap_or_default();
 
     // Two-phase parallel treesitter: serial tree walk collects a unique
     // blob set (no dedup loss), then rayon-parses each blob once. Prior
@@ -105,7 +105,7 @@ pub fn run(
         .filter(|(_, plan)| plan.is_sampled)
         .map(|(commit, _)| commit.sha.clone())
         .collect();
-    let snapshot_map = treesitter::batch_sampled(repo, &sampled_shas);
+    let mut snapshot_map = treesitter::batch_sampled(repo, &sampled_shas);
 
     // Flush cadence: how many commits between BEGIN/COMMIT chunk
     // boundaries + Appender flushes. Trade-off:
@@ -206,11 +206,13 @@ pub fn run(
             trailers_app.append_row(params![commit.sha, tid, tr.role.as_str()])?;
         }
 
-        if let Some(diff) = churn_map.get(&commit.sha) {
-            for c in &diff.churn {
+        // remove() drops the entry as we go so peak RSS trails commit
+        // progress rather than sitting at "everything I ever computed."
+        if let Some(diff) = churn_map.remove(&commit.sha) {
+            for c in diff.churn {
                 churn_app.append_row(params![commit.sha, c.path, c.added, c.deleted])?;
             }
-            for h in &diff.hunks {
+            for h in diff.hunks {
                 hunks_app.append_row(params![
                     commit.sha,
                     h.path,
@@ -224,7 +226,7 @@ pub fn run(
         }
 
         if plan.is_sampled {
-            if let Some(files) = snapshot_map.get(&commit.sha) {
+            if let Some(files) = snapshot_map.remove(&commit.sha) {
                 for f in files {
                     file_stats_app.append_row(params![
                         commit.sha,
@@ -234,7 +236,7 @@ pub fn run(
                         f.stat.comments,
                         f.stat.blanks
                     ])?;
-                    for def in &f.funcs {
+                    for def in f.funcs {
                         funcs_app.append_row(params![
                             commit.sha,
                             f.stat.path,
