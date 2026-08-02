@@ -113,9 +113,11 @@ pub fn run(
     // - large chunks minimize per-commit sync cost (auto-commit = disk
     //   round-trip per row), but hold every row in RAM until commit.
     // - small chunks bound RAM but pay more sync cost.
-    // On ratatui-scale (2.5k commits, ~150 hunks each), 50 keeps peak
-    // RSS < 1 GB while running >5 commits/s. Not a knob.
-    const FLUSH_EVERY: usize = 50;
+    // Appender-flush cadence. Each flush syncs 7 tables to disk (7
+    // 30-ms round-trips). Set to INDEX_CHUNK so we flush once per
+    // chunk boundary instead of mid-chunk. Peak Appender buffer =
+    // one chunk's worth, which we already tolerate.
+    const FLUSH_EVERY: usize = 1000;
 
     let mut last_progress_at = std::time::Instant::now();
     let progress_interval = std::time::Duration::from_millis(100);
