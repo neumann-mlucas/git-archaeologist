@@ -6,6 +6,7 @@ pub enum BucketSize {
     Day,
     Week,
     Month,
+    Tag,
 }
 
 impl BucketSize {
@@ -15,6 +16,7 @@ impl BucketSize {
             "day" => Some(Self::Day),
             "week" => Some(Self::Week),
             "month" => Some(Self::Month),
+            "tag" => Some(Self::Tag),
             _ => None,
         }
     }
@@ -37,6 +39,7 @@ pub fn auto(total_commits: usize) -> BucketSize {
 /// - Day:    YYYYMMDD
 /// - Week:   YYYYWW (ISO week)
 /// - Month:  YYYYMM
+/// - Tag:    panics — callers must use `tag_bucket_key` with the tag list.
 pub fn bucket_key(ts: OffsetDateTime, size: BucketSize) -> i64 {
     match size {
         BucketSize::Commit => ts.unix_timestamp(),
@@ -47,15 +50,28 @@ pub fn bucket_key(ts: OffsetDateTime, size: BucketSize) -> i64 {
                 + (d.day() as i64)
         }
         BucketSize::Week => {
-            // Use ISO year (not calendar year) so keys sort correctly across
-            // Dec/Jan boundaries where the ISO week rolls into the next year.
             let (iso_year, iso_week, _) = ts.date().to_iso_week_date();
             (iso_year as i64) * 100 + (iso_week as i64)
         }
         BucketSize::Month => {
             (ts.year() as i64) * 100 + (u8::from(ts.month()) as i64)
         }
+        BucketSize::Tag => {
+            unreachable!("BucketSize::Tag requires tag_bucket_key(ts, tag_dates)")
+        }
     }
+}
+
+/// Bucket key for a `Tag` bucket. `tag_dates_sorted` is ascending tagger
+/// unix-seconds.
+///
+/// Returns the 0-based index of the latest tag whose tagged_at ≤ ts. Any
+/// commit older than the earliest tag falls into bucket `-1` (a synthetic
+/// "pre-history" bucket that queries can filter out or render as "untagged").
+pub fn tag_bucket_key(ts: OffsetDateTime, tag_dates_sorted: &[i64]) -> i64 {
+    let ts_sec = ts.unix_timestamp();
+    let idx = tag_dates_sorted.partition_point(|&t| t <= ts_sec);
+    (idx as i64) - 1
 }
 
 #[cfg(test)]
@@ -120,6 +136,34 @@ mod tests {
         assert_eq!(BucketSize::parse("week"), Some(BucketSize::Week));
         assert_eq!(BucketSize::parse("COMMIT"), Some(BucketSize::Commit));
         assert_eq!(BucketSize::parse("month"), Some(BucketSize::Month));
+        assert_eq!(BucketSize::parse("tag"), Some(BucketSize::Tag));
         assert_eq!(BucketSize::parse("year"), None);
+    }
+
+    #[test]
+    fn tag_bucket_before_first_tag_is_neg_one() {
+        // Tags at t=100, 200, 300; commit at t=50 → -1.
+        let ts = OffsetDateTime::from_unix_timestamp(50).unwrap();
+        assert_eq!(tag_bucket_key(ts, &[100, 200, 300]), -1);
+    }
+
+    #[test]
+    fn tag_bucket_at_and_after_tags() {
+        // Commit at t=100 (== first tag) → bucket 0.
+        // Commit at t=150 (between tag 0 and 1) → bucket 0.
+        // Commit at t=200 (== tag 1) → bucket 1.
+        // Commit at t=350 (after last tag) → bucket 2.
+        let tags = &[100i64, 200, 300];
+        let mk = |s: i64| OffsetDateTime::from_unix_timestamp(s).unwrap();
+        assert_eq!(tag_bucket_key(mk(100), tags), 0);
+        assert_eq!(tag_bucket_key(mk(150), tags), 0);
+        assert_eq!(tag_bucket_key(mk(200), tags), 1);
+        assert_eq!(tag_bucket_key(mk(350), tags), 2);
+    }
+
+    #[test]
+    fn tag_bucket_empty_tag_list_all_neg_one() {
+        let ts = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert_eq!(tag_bucket_key(ts, &[]), -1);
     }
 }

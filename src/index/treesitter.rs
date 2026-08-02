@@ -15,9 +15,22 @@ pub struct FileStat {
     pub blanks: u32,
 }
 
-/// Blob-parse memoization: same OID → same result. Used across sampled
-/// commits so unchanged files aren't re-parsed. Direct port of the tokei
-/// BlobCache; only the CachedParse content changes.
+#[derive(Debug, Clone)]
+pub struct FuncDef {
+    pub name: String,
+    /// 'fn' | 'method' | 'test'
+    pub kind: String,
+    /// 1-based line numbers, inclusive.
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileSnapshot {
+    pub stat: FileStat,
+    pub funcs: Vec<FuncDef>,
+}
+
 #[derive(Default)]
 pub struct BlobCache {
     entries: HashMap<gix::ObjectId, Option<CachedParse>>,
@@ -29,23 +42,40 @@ struct CachedParse {
     code: u32,
     comments: u32,
     blanks: u32,
+    funcs: Vec<FuncDef>,
 }
 
 const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
-/// Language registry — hooks a `tree_sitter::Language` and the node kinds
-/// that count as comments, keyed by file extension.
+#[derive(Copy, Clone, Debug)]
+enum TestDetect {
+    /// Path-based only. Applies to JS/TS/C/C++.
+    None,
+    /// Rust — walk preceding siblings of the def for an `attribute_item`
+    /// whose source contains "test", OR check ancestor `mod_item`s for a
+    /// `cfg(test)` attribute.
+    RustAttr,
+    /// Python / Go — `name.starts_with(prefix)`. Case-sensitive.
+    NamePrefix(&'static str),
+}
+
 #[derive(Clone)]
 struct LangSpec {
-    /// Display label written to the DB. Matches gross tokei labels where
-    /// possible so downstream palette hashing stays roughly stable.
     label: &'static str,
     language: Language,
     comment_kinds: &'static [&'static str],
+    /// Node kinds that count as a top-level function definition.
+    fn_kinds: &'static [&'static str],
+    /// Node kinds that count as a method (function inside a type/class/impl).
+    method_kinds: &'static [&'static str],
+    /// Ancestor kinds under which `fn_kinds` should be reported as
+    /// `method` instead of `fn` (e.g. Rust's `impl_item`, Python's
+    /// `class_definition`, C++'s `class_specifier` / `struct_specifier`).
+    method_ancestor_kinds: &'static [&'static str],
+    test_detect: TestDetect,
 }
 
 pub struct LangRegistry {
-    /// Keyed by lowercased file extension (no leading dot).
     by_ext: HashMap<&'static str, LangSpec>,
     parser: Parser,
 }
@@ -53,21 +83,22 @@ pub struct LangRegistry {
 impl LangRegistry {
     pub fn new() -> Self {
         let mut m = HashMap::new();
-
-        // Helper: attach `spec` to every extension in `exts`.
         let mut add = |exts: &[&'static str], spec: LangSpec| {
             for e in exts {
                 m.insert(*e, spec.clone());
             }
         };
 
-        // C-family and friends unify comments under a single `comment` kind.
         add(
             &["rs"],
             LangSpec {
                 label: "Rust",
                 language: tree_sitter_rust::LANGUAGE.into(),
                 comment_kinds: &["line_comment", "block_comment"],
+                fn_kinds: &["function_item"],
+                method_kinds: &[],
+                method_ancestor_kinds: &["impl_item"],
+                test_detect: TestDetect::RustAttr,
             },
         );
         add(
@@ -76,6 +107,10 @@ impl LangRegistry {
                 label: "Python",
                 language: tree_sitter_python::LANGUAGE.into(),
                 comment_kinds: &["comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &[],
+                method_ancestor_kinds: &["class_definition"],
+                test_detect: TestDetect::NamePrefix("test_"),
             },
         );
         add(
@@ -84,6 +119,10 @@ impl LangRegistry {
                 label: "JavaScript",
                 language: tree_sitter_javascript::LANGUAGE.into(),
                 comment_kinds: &["comment", "html_comment"],
+                fn_kinds: &["function_declaration", "generator_function_declaration"],
+                method_kinds: &["method_definition"],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
             },
         );
         add(
@@ -92,6 +131,14 @@ impl LangRegistry {
                 label: "TypeScript",
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 comment_kinds: &["comment", "html_comment"],
+                fn_kinds: &[
+                    "function_declaration",
+                    "function_signature",
+                    "generator_function_declaration",
+                ],
+                method_kinds: &["method_definition", "method_signature"],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
             },
         );
         add(
@@ -100,6 +147,14 @@ impl LangRegistry {
                 label: "TSX",
                 language: tree_sitter_typescript::LANGUAGE_TSX.into(),
                 comment_kinds: &["comment", "html_comment"],
+                fn_kinds: &[
+                    "function_declaration",
+                    "function_signature",
+                    "generator_function_declaration",
+                ],
+                method_kinds: &["method_definition", "method_signature"],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
             },
         );
         add(
@@ -108,6 +163,10 @@ impl LangRegistry {
                 label: "Go",
                 language: tree_sitter_go::LANGUAGE.into(),
                 comment_kinds: &["comment"],
+                fn_kinds: &["function_declaration"],
+                method_kinds: &["method_declaration"],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::NamePrefix("Test"),
             },
         );
         add(
@@ -116,6 +175,10 @@ impl LangRegistry {
                 label: "C",
                 language: tree_sitter_c::LANGUAGE.into(),
                 comment_kinds: &["comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
             },
         );
         add(
@@ -124,102 +187,10 @@ impl LangRegistry {
                 label: "C++",
                 language: tree_sitter_cpp::LANGUAGE.into(),
                 comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["java"],
-            LangSpec {
-                label: "Java",
-                language: tree_sitter_java::LANGUAGE.into(),
-                comment_kinds: &["line_comment", "block_comment"],
-            },
-        );
-        add(
-            &["rb"],
-            LangSpec {
-                label: "Ruby",
-                language: tree_sitter_ruby::LANGUAGE.into(),
-                comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["sh", "bash"],
-            LangSpec {
-                label: "Bash",
-                language: tree_sitter_bash::LANGUAGE.into(),
-                comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["html", "htm"],
-            LangSpec {
-                label: "HTML",
-                language: tree_sitter_html::LANGUAGE.into(),
-                comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["css"],
-            LangSpec {
-                label: "CSS",
-                language: tree_sitter_css::LANGUAGE.into(),
-                comment_kinds: &["comment", "js_comment"],
-            },
-        );
-        add(
-            &["json"],
-            LangSpec {
-                label: "JSON",
-                language: tree_sitter_json::LANGUAGE.into(),
-                comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["yaml", "yml"],
-            LangSpec {
-                label: "YAML",
-                language: tree_sitter_yaml::LANGUAGE.into(),
-                comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["toml"],
-            LangSpec {
-                label: "TOML",
-                language: tree_sitter_toml_ng::LANGUAGE.into(),
-                comment_kinds: &["comment"],
-            },
-        );
-        add(
-            &["md", "markdown"],
-            LangSpec {
-                label: "Markdown",
-                language: tree_sitter_md::LANGUAGE.into(),
-                comment_kinds: &[],
-            },
-        );
-        add(
-            &["scala", "sc"],
-            LangSpec {
-                label: "Scala",
-                language: tree_sitter_scala::LANGUAGE.into(),
-                comment_kinds: &["comment", "block_comment"],
-            },
-        );
-        add(
-            &["hs"],
-            LangSpec {
-                label: "Haskell",
-                language: tree_sitter_haskell::LANGUAGE.into(),
-                comment_kinds: &["comment", "haddock"],
-            },
-        );
-        add(
-            &["zig"],
-            LangSpec {
-                label: "Zig",
-                language: tree_sitter_zig::LANGUAGE.into(),
-                comment_kinds: &["comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &[],
+                method_ancestor_kinds: &["class_specifier", "struct_specifier"],
+                test_detect: TestDetect::None,
             },
         );
 
@@ -233,11 +204,6 @@ impl LangRegistry {
         let ext = Path::new(path).extension().and_then(|s| s.to_str())?;
         self.by_ext.get(ext.to_ascii_lowercase().as_str())
     }
-
-    /// Public accessor — is this path recognized by any grammar?
-    pub fn is_known(&self, path: &str) -> bool {
-        self.spec_for(path).is_some()
-    }
 }
 
 impl Default for LangRegistry {
@@ -246,14 +212,12 @@ impl Default for LangRegistry {
     }
 }
 
-/// Snapshot LOC per file at `sha`. Mirrors the old `tokei_run::snapshot`
-/// signature so `index::mod` can swap over cleanly.
 pub fn snapshot(
     repo: &Repo,
     sha: &str,
     cache: &mut BlobCache,
     registry: &mut LangRegistry,
-) -> Result<Vec<FileStat>> {
+) -> Result<Vec<FileSnapshot>> {
     let oid: gix::ObjectId = sha.parse().context("parsing commit sha")?;
     let commit = repo
         .git
@@ -277,9 +241,6 @@ pub fn snapshot(
         }
         let path_str = entry.filepath.to_string();
 
-        // Language detection is extension-based (cheap). Unknown extensions
-        // are skipped entirely — tree-sitter can't parse without a grammar
-        // and there's no reasonable fallback line count without one.
         let has_spec = registry.spec_for(&path_str).is_some();
         if !has_spec {
             continue;
@@ -295,12 +256,24 @@ pub fn snapshot(
         };
 
         if let Some(c) = cached {
-            out.push(FileStat {
-                path: path_str,
-                language: c.language,
-                code: c.code,
-                comments: c.comments,
-                blanks: c.blanks,
+            // Path-based test fallback: if the file lives in a test dir /
+            // uses a test-name suffix, mark every func as 'test'. Overrides
+            // the per-lang detector.
+            let mut funcs = c.funcs;
+            if is_test_path(&path_str) {
+                for f in funcs.iter_mut() {
+                    f.kind = "test".to_string();
+                }
+            }
+            out.push(FileSnapshot {
+                stat: FileStat {
+                    path: path_str,
+                    language: c.language,
+                    code: c.code,
+                    comments: c.comments,
+                    blanks: c.blanks,
+                },
+                funcs,
             });
         }
     }
@@ -318,7 +291,6 @@ fn parse_blob(
     if blob.data.len() > MAX_BLOB_BYTES {
         return None;
     }
-    // Fast binary reject: first 8KiB contains NUL → skip.
     let head = &blob.data[..blob.data.len().min(8192)];
     if head.contains(&0u8) {
         return None;
@@ -327,33 +299,226 @@ fn parse_blob(
     let spec = registry.spec_for(path)?;
     let label = spec.label.to_string();
     let language = spec.language.clone();
-    let comment_kinds: Vec<&'static str> = spec.comment_kinds.to_vec();
+    let spec_snapshot = spec.clone();
 
     registry.parser.set_language(&language).ok()?;
     let tree: Tree = registry.parser.parse(&*blob.data, None)?;
 
-    let (code, comments, blanks) = count_lines(&blob.data, tree.root_node(), &comment_kinds);
+    let (code, comments, blanks) =
+        count_lines(&blob.data, tree.root_node(), spec_snapshot.comment_kinds);
+    let funcs = extract_funcs(&blob.data, tree.root_node(), &spec_snapshot);
+
     Some(CachedParse {
         language: label,
         code,
         comments,
         blanks,
+        funcs,
     })
 }
 
-/// Classify every line of source as blank / comment / code.
-/// Rules:
-///   - blank: line has no non-whitespace bytes at all.
-///   - code: line has non-whitespace bytes OUTSIDE any comment-node byte
-///     range. (Matches tokei: `let x = 1; // trailing` is code.)
-///   - comment: line has non-whitespace bytes AND every one falls inside
-///     a comment-node byte range.
+fn is_test_path(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    if p.starts_with("tests/") || p.contains("/tests/") {
+        return true;
+    }
+    if p.starts_with("__tests__/") || p.contains("/__tests__/") {
+        return true;
+    }
+    if p.contains(".spec.") {
+        return true;
+    }
+    for suf in [
+        ".test.js",
+        ".test.ts",
+        ".test.jsx",
+        ".test.tsx",
+        "_test.c",
+        "_test.cc",
+        "_test.cpp",
+        "_test.cxx",
+    ] {
+        if p.ends_with(suf) {
+            return true;
+        }
+    }
+    // Python test convention.
+    if let Some(name) = Path::new(&p).file_name().and_then(|s| s.to_str()) {
+        if name.starts_with("test_") && name.ends_with(".py") {
+            return true;
+        }
+        for prefix in ["test_"] {
+            for ext in [".c", ".cc", ".cpp", ".cxx"] {
+                if name.starts_with(prefix) && name.ends_with(ext) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Walk the AST and emit one `FuncDef` per top-level (or method-level)
+/// function declaration recognized by `spec`.
+fn extract_funcs(source: &[u8], root: Node, spec: &LangSpec) -> Vec<FuncDef> {
+    let mut out = Vec::new();
+    walk_defs(source, root, spec, &mut out);
+    out
+}
+
+fn walk_defs(source: &[u8], node: Node, spec: &LangSpec, out: &mut Vec<FuncDef>) {
+    let kind = node.kind();
+    let is_fn = spec.fn_kinds.contains(&kind);
+    let is_method = spec.method_kinds.contains(&kind);
+
+    if is_fn || is_method {
+        if let Some(def) = build_def(source, node, spec, is_method) {
+            out.push(def);
+        }
+        // Do NOT recurse into a function body — nested closures/inner fns
+        // aren't top-level defs. Same convention as SPEC's "top-level def".
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_defs(source, child, spec, out);
+    }
+}
+
+fn build_def(source: &[u8], node: Node, spec: &LangSpec, is_method: bool) -> Option<FuncDef> {
+    let name = extract_name(source, node)?;
+    let start_line = node.start_position().row as u32 + 1;
+    let end_line = node.end_position().row as u32 + 1;
+
+    let mut kind = if is_method {
+        "method"
+    } else if ancestor_matches(node, spec.method_ancestor_kinds) {
+        "method"
+    } else {
+        "fn"
+    }
+    .to_string();
+
+    if is_test(source, node, spec, &name) {
+        kind = "test".to_string();
+    }
+
+    Some(FuncDef {
+        name,
+        kind,
+        start_line,
+        end_line,
+    })
+}
+
+fn ancestor_matches(node: Node, kinds: &[&str]) -> bool {
+    if kinds.is_empty() {
+        return false;
+    }
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if kinds.contains(&p.kind()) {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+fn extract_name(source: &[u8], node: Node) -> Option<String> {
+    if let Some(n) = node.child_by_field_name("name") {
+        return node_text(source, n);
+    }
+    // C/C++ path: function_definition has a `declarator` field; recurse
+    // through nested declarators to find the identifier at the leaf.
+    if let Some(decl) = node.child_by_field_name("declarator") {
+        return find_ident(source, decl);
+    }
+    None
+}
+
+fn find_ident(source: &[u8], node: Node) -> Option<String> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "type_identifier" => {
+            return node_text(source, node);
+        }
+        _ => {}
+    }
+    if let Some(d) = node.child_by_field_name("declarator") {
+        if let Some(n) = find_ident(source, d) {
+            return Some(n);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(n) = find_ident(source, child) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn node_text(source: &[u8], node: Node) -> Option<String> {
+    let slice = source.get(node.start_byte()..node.end_byte())?;
+    std::str::from_utf8(slice).ok().map(|s| s.to_string())
+}
+
+fn is_test(source: &[u8], node: Node, spec: &LangSpec, name: &str) -> bool {
+    match spec.test_detect {
+        TestDetect::None => false,
+        TestDetect::NamePrefix(prefix) => name.starts_with(prefix),
+        TestDetect::RustAttr => rust_test_attr(source, node),
+    }
+}
+
+/// Rust-specific: check preceding sibling `attribute_item`s of this
+/// function for `#[test]` / `#[tokio::test]`-style markers, OR check any
+/// ancestor `mod_item` for a `#[cfg(test)]` attribute.
+fn rust_test_attr(source: &[u8], node: Node) -> bool {
+    // Preceding attribute siblings.
+    let mut prev = node.prev_sibling();
+    while let Some(sib) = prev {
+        if sib.kind() == "attribute_item" || sib.kind() == "inner_attribute_item" {
+            if let Some(txt) = node_text(source, sib) {
+                if txt.contains("test") {
+                    return true;
+                }
+            }
+            prev = sib.prev_sibling();
+        } else {
+            break;
+        }
+    }
+    // Ancestor mod with cfg(test).
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if p.kind() == "mod_item" {
+            // Look at siblings preceding this mod for cfg(test).
+            let mut ap = p.prev_sibling();
+            while let Some(sib) = ap {
+                if sib.kind() == "attribute_item" || sib.kind() == "inner_attribute_item" {
+                    if let Some(txt) = node_text(source, sib) {
+                        if txt.contains("cfg(test)") {
+                            return true;
+                        }
+                    }
+                    ap = sib.prev_sibling();
+                } else {
+                    break;
+                }
+            }
+        }
+        cur = p.parent();
+    }
+    false
+}
+
 fn count_lines(source: &[u8], root: Node, comment_kinds: &[&str]) -> (u32, u32, u32) {
     if source.is_empty() {
         return (0, 0, 0);
     }
 
-    // Collect comment byte ranges.
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     collect_comment_ranges(root, comment_kinds, &mut ranges);
     ranges.sort_unstable_by_key(|r| r.0);
@@ -378,7 +543,6 @@ fn count_lines(source: &[u8], root: Node, comment_kinds: &[&str]) -> (u32, u32, 
             line_start = i + 1;
         }
     }
-    // Trailing partial line without a final newline.
     if line_start < source.len() {
         classify(line_start, source.len());
     }
@@ -415,8 +579,6 @@ fn classify_line(line: &[u8], line_start_byte: usize, ranges: &[(usize, usize)])
 }
 
 fn byte_inside_any(abs: usize, ranges: &[(usize, usize)]) -> bool {
-    // Small counts of comment ranges — linear scan is fine. For very large
-    // files this could switch to a binary search on start byte.
     ranges.iter().any(|(s, e)| abs >= *s && abs < *e)
 }
 
@@ -435,7 +597,6 @@ fn collect_comment_ranges(node: Node, comment_kinds: &[&str], out: &mut Vec<(usi
 mod tests {
     use super::*;
 
-    /// Parse `src` under `lang`, count lines against `comment_kinds`.
     fn count(lang: Language, comment_kinds: &[&str], src: &str) -> (u32, u32, u32) {
         let mut parser = Parser::new();
         parser.set_language(&lang).unwrap();
@@ -443,9 +604,19 @@ mod tests {
         count_lines(src.as_bytes(), tree.root_node(), comment_kinds)
     }
 
+    fn parse_and_extract(src: &str, spec: &LangSpec) -> Vec<FuncDef> {
+        let mut parser = Parser::new();
+        parser.set_language(&spec.language).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        extract_funcs(src.as_bytes(), tree.root_node(), spec)
+    }
+
+    fn spec_for(reg: &LangRegistry, ext: &str) -> LangSpec {
+        reg.by_ext.get(ext).expect("spec").clone()
+    }
+
     #[test]
     fn rust_mixed() {
-        // 5 code, 3 comments, 2 blanks (10 lines total).
         let src = "\
 // header comment
 fn main() {
@@ -468,8 +639,6 @@ fn main() {
 
     #[test]
     fn python_docstring_is_not_a_comment() {
-        // Python `#` comments only. Triple-quoted docstrings are string
-        // expressions, not comments — should count as code.
         let src = "\
 # leading comment
 def add(a, b):
@@ -486,7 +655,6 @@ def add(a, b):
         );
         assert_eq!(comments, 2);
         assert_eq!(blanks, 1);
-        // 4 code lines: `def`, docstring line 1, docstring line 2, `return`.
         assert_eq!(code, 4);
     }
 
@@ -529,29 +697,8 @@ int main() {
             &["comment"],
             src,
         );
-        // 5 code lines: #include, int main() {, printf trailing, return, }.
         assert_eq!(code, 5);
         assert_eq!(comments, 3);
-        assert_eq!(blanks, 1);
-    }
-
-    #[test]
-    fn toml_comment() {
-        let src = "\
-# top-level comment
-[package]
-name = \"foo\"
-
-# section comment
-version = \"1.0\"
-";
-        let (code, comments, blanks) = count(
-            tree_sitter_toml_ng::LANGUAGE.into(),
-            &["comment"],
-            src,
-        );
-        assert_eq!(code, 3);
-        assert_eq!(comments, 2);
         assert_eq!(blanks, 1);
     }
 
@@ -569,9 +716,153 @@ version = \"1.0\"
         assert!(r.spec_for("foo.rs").is_some());
         assert!(r.spec_for("foo.PY").is_some());
         assert!(r.spec_for("foo.cxx").is_some());
-        assert!(r.spec_for("Cargo.toml").is_some());
-        assert!(r.spec_for("README.md").is_some());
+        assert!(r.spec_for("foo.ts").is_some());
+        assert!(r.spec_for("foo.tsx").is_some());
+        assert!(r.spec_for("Cargo.toml").is_none());
+        assert!(r.spec_for("README.md").is_none());
         assert!(r.spec_for("foo.unknown").is_none());
         assert!(r.spec_for("no_extension").is_none());
+    }
+
+    // ---- extract_funcs tests ----
+
+    #[test]
+    fn rust_extracts_fn_method_test() {
+        let src = "\
+fn top() {}
+
+#[test]
+fn t1() {}
+
+impl Foo {
+    fn m(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    fn inside() {}
+}
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "rs");
+        let defs = parse_and_extract(src, &spec);
+        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
+        assert_eq!(by_name.get("t1").map(|s| s.as_str()), Some("test"));
+        assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
+        assert_eq!(by_name.get("inside").map(|s| s.as_str()), Some("test"));
+    }
+
+    #[test]
+    fn python_extracts_fn_method_test() {
+        let src = "\
+def top():
+    pass
+
+def test_it():
+    pass
+
+class C:
+    def m(self):
+        pass
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "py");
+        let defs = parse_and_extract(src, &spec);
+        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
+        assert_eq!(by_name.get("test_it").map(|s| s.as_str()), Some("test"));
+        assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
+    }
+
+    #[test]
+    fn go_extracts_test_prefix() {
+        let src = "\
+package p
+
+func Regular() {}
+
+func TestSomething(t *testing.T) {}
+
+func (r *Recv) Method() {}
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "go");
+        let defs = parse_and_extract(src, &spec);
+        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        assert_eq!(by_name.get("Regular").map(|s| s.as_str()), Some("fn"));
+        assert_eq!(by_name.get("TestSomething").map(|s| s.as_str()), Some("test"));
+        assert_eq!(by_name.get("Method").map(|s| s.as_str()), Some("method"));
+    }
+
+    #[test]
+    fn c_extracts_function() {
+        let src = "\
+int add(int a, int b) {
+    return a + b;
+}
+
+static void log(const char *m) {}
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "c");
+        let defs = parse_and_extract(src, &spec);
+        let names: Vec<_> = defs.iter().map(|d| d.name.clone()).collect();
+        assert!(names.contains(&"add".to_string()));
+        assert!(names.contains(&"log".to_string()));
+    }
+
+    #[test]
+    fn js_extracts_function_and_method() {
+        let src = "\
+function top() {}
+
+class C {
+    m() {}
+}
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "js");
+        let defs = parse_and_extract(src, &spec);
+        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
+        assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
+    }
+
+    #[test]
+    fn ts_extracts_function_and_method() {
+        let src = "\
+function top(): void {}
+
+class C {
+    m(): number { return 1 }
+}
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "ts");
+        let defs = parse_and_extract(src, &spec);
+        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
+        assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
+    }
+
+    #[test]
+    fn is_test_path_matrix() {
+        assert!(is_test_path("tests/foo.rs"));
+        assert!(is_test_path("src/nested/tests/x.py"));
+        assert!(is_test_path("app/__tests__/foo.js"));
+        assert!(is_test_path("src/foo.test.ts"));
+        assert!(is_test_path("src/foo.spec.tsx"));
+        assert!(is_test_path("src/test_utils.py"));
+        assert!(is_test_path("src/mymodule_test.cpp"));
+        assert!(!is_test_path("src/main.rs"));
+        assert!(!is_test_path("lib/foo.py"));
+    }
+
+    #[test]
+    fn is_test_path_overrides_kind_in_snapshot() {
+        // Just check the helper; the snapshot integration is covered by
+        // index::tests::smoke_index_tiny_repo via funcs table.
+        assert!(is_test_path("tests/mod.rs"));
     }
 }

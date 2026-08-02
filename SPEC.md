@@ -35,7 +35,7 @@ Answers questions like:
 - Metrics enumerated in §Metrics.
 - Output = parquet dump + subcommand-per-metric emitting TSV/CSV/JSON on
   stdout for piping.
-- Function-level metrics for the 5 languages with tree-sitter grammars
+- Function-level metrics for the 7 languages with tree-sitter grammars
   linked in.
 
 ### Explicitly out of scope (v1)
@@ -83,10 +83,12 @@ metric = new query. No new Rust code per metric.
 Test detection is definition-based for Rust (`#[test]`, `#[cfg(test)]`),
 Python (`def test_*`), Go (`func Test*`). JS/TS is best-effort call-site
 match on `describe`/`it`/`test(...)` — pattern-recognized via
-tree-sitter but less reliable than def-based. Fallback: any file under
-`tests/`, `__tests__/`, `*.test.{js,ts,jsx,tsx}` or `*.spec.*` counts
-as test.
-
+tree-sitter but less reliable than def-based. C/C++ is call-site match
+on `TEST(...)` / `TEST_F(...)` (gtest) and `TEST_CASE(...)` (catch2);
+no compiler-enforced convention exists, so accuracy tracks JS/TS.
+Fallback: any file under `tests/`, `__tests__/`, `*.test.{js,ts,jsx,tsx}`,
+`*.spec.*`, or matching `*_test.{c,cc,cpp,cxx}` / `test_*.{c,cc,cpp,cxx}`
+counts as test.
 
 9. **Function hotspot** — churn per top-level def per bucket. Sort desc,
    surface top N.
@@ -170,7 +172,7 @@ the fixed rule. Anything more exotic → `git-arch sql "SELECT ..."`.
 
 `aliases.toml` schema unchanged from prior spec.
 
-## Language stack — tree-sitter, 5 grammars
+## Language stack — tree-sitter, 7 grammars
 
 V1 grammars linked in statically:
 
@@ -179,11 +181,13 @@ V1 grammars linked in statically:
 - JavaScript
 - TypeScript (covers `.ts` + `.tsx`)
 - Go
+- C
+- C++
 
 Non-negotiables:
-- Function-level metrics only work for these 5 in v1.
+- Function-level metrics only work for these 7 in v1.
 - Line-level metrics (comment density, code/blank split) also
-  tree-sitter for these 5; other languages fall back to an
+  tree-sitter for these 7; other languages fall back to an
   extension-map heuristic (single-line comment prefix + block delimiters
   by ext) so burndown-by-language keeps working.
 - Detection: extension → language. No content sniffing in v1.
@@ -449,7 +453,7 @@ SUBCOMMAND-SPECIFIC
 - Cached-run query (any subcommand, default filters): < 500 ms.
 - Cache size: < 200 MB for 10k-commit polyglot repo (hunks table is the
   hot cost).
-- `sql` REPL warm-start: < 200 ms.
+- `sql` subcommand warm-start: < 200 ms.
 
 Perf is a v1 requirement, not a v1.1 aspiration. If we're not faster
 than theseus + hercules on the same repo, the project has no reason to
@@ -465,7 +469,7 @@ lower two are opt-in / weekly.
 Per-module. Sub-second.
 
 - `bucket::bucket_key` — day / week (ISO year-wrap) / month / commit / tag.
-- `treesitter::count_lines` — one fixture per grammar (Rust, Py, JS, TS, Go).
+- `treesitter::count_lines` — one fixture per grammar (Rust, Py, JS, TS, Go, C, C++).
 - `treesitter::extract_funcs` — same fixtures, function boundaries.
 - `query::apply_view` — cohort dense-fill, cumulative running-sum.
 - `mailmap` + trailer parsing — `Co-authored-by:`, `Signed-off-by:`,
@@ -480,7 +484,7 @@ A hand-built tiny repo lives at `tests/data/golden/` (or is built at test
 time via `tempfile` + system `git`). Bit-exact assertions on every
 metric.
 
-- 3-author, 5-language, 30-commit fixture with known truths:
+- 3-author, 7-language, 30-commit fixture with known truths:
   - Includes a rename, a merge, a revert, a `Co-authored-by:` trailer,
     a Conventional Commit `feat!:`, a tag, and a `.git-blame-ignore-revs`
     entry.
@@ -572,16 +576,17 @@ Justify every crate on the fence.
 |-------|-----|----------------------|
 | `gix` | pure-Rust git, no subprocess, gives hunks + rename via `blob_diff` | shell out to `git` — slower per-commit |
 | `duckdb` (unbundled) | columnar OLAP + parquet native + window fns; new metric = new query | `sqlite` (row-store, slow on aggregations); polars (no persistence story) |
-| `tree-sitter` + 5 grammars | required for function-level + exact comment split | regex (approximate, no function-level) |
+| `tree-sitter` + 7 grammars | required for function-level + exact comment split | regex (approximate, no function-level) |
 | `rayon` | per-commit parallelism | manual threading |
 | `clap` | CLI | — |
-| `plotters` | **rejected** — no plotting in v1 |
-| `ratatui`, `crossterm` | **rejected** — no TUI in v1 |
+| `plotters` | — | **rejected** — no plotting in v1 |
+| `ratatui`, `crossterm` | — | **rejected** — no TUI in v1 |
 | `directories` | XDG paths | — |
 | `time` | timestamps + tz | chrono |
 
 **Removed vs prior spec:** ratatui, crossterm, plotters (never added,
-now formally out), 15 of 20 tree-sitter grammars.
+now formally out), 12 of the 19 tree-sitter grammars currently linked
+(kept: Rust, Python, JS, TS, Go, C, C++).
 
 **Distribution: prebuilt binaries via `cargo dist` are the primary
 install path.** Users download a static-linked binary from GitHub
@@ -593,7 +598,8 @@ dropped — first build no longer takes 5-15 minutes for either path.
 
 ## Roadmap post-v1
 
-- v1.1: extra grammars behind Cargo features (Java, C, C++, Ruby, ...).
+- v1.1: extra grammars behind Cargo features (Java, Ruby, Bash, HTML,
+  CSS, JSON, YAML, TOML, Markdown, Scala, Haskell, Zig, ...).
 - v1.1: `git-arch serve` — unix socket daemon; editor extensions.
 - v1.2: full incremental blame (RB-tree, hercules-style) IF a real user
   asks for line-level ownership. Kept out of v1 because cohort covers

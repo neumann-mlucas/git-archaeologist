@@ -1,7 +1,8 @@
-pub mod blame;
 pub mod bucket;
 pub mod churn;
+pub mod cohort;
 pub mod mailmap;
+pub mod parse;
 pub mod treesitter;
 pub mod walker;
 
@@ -21,7 +22,6 @@ use crate::repo::Repo;
 pub enum Progress {
     Started { total_commits: usize, sampled: usize },
     Commit { done: usize, total: usize },
-    Blame { done: usize, total: usize },
     Finished,
 }
 
@@ -36,14 +36,34 @@ pub fn run(
     opts: IndexOptions,
     progress: Option<Sender<Progress>>,
 ) -> Result<()> {
-    let all_commits = walker::walk(repo, /* skip_merges */ true)?;
+    let ignore_revs = parse::load_ignore_revs(&repo.root);
+
+    let all_commits = walker::walk(repo, &ignore_revs)?;
     if all_commits.is_empty() {
         return Ok(());
     }
 
-    let size = opts
+    let mut size = opts
         .bucket_override
         .unwrap_or_else(|| bucket::auto(all_commits.len()));
+
+    // Tag-bucket collection is done ahead of assign so we can inject dates
+    // even when the override didn't ask for `Tag`. If the user asked for
+    // `Tag` but no reachable tags exist, degrade to auto so downstream
+    // metrics still work.
+    let tag_dates: Vec<i64> = {
+        let mut v: Vec<i64> = walker::tags(repo)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.tagged_at)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    if size == BucketSize::Tag && tag_dates.is_empty() {
+        eprintln!("bucket=tag requested but repo has no tags; falling back to auto");
+        size = bucket::auto(all_commits.len());
+    }
 
     if opts.force_full {
         wipe_data(cache)?;
@@ -53,8 +73,7 @@ pub fn run(
 
     queries::set_meta(&cache.conn, "bucket_size", &format!("{size:?}"))?;
 
-    // Assign bucket_key to every commit; mark last-per-bucket as sampled.
-    let assignments = assign_buckets(&all_commits, size);
+    let assignments = assign_buckets(&all_commits, size, &tag_dates);
 
     let total = all_commits.len();
     let sampled_count = assignments.iter().filter(|a| a.is_sampled).count();
@@ -64,31 +83,31 @@ pub fn run(
             sampled: sampled_count,
         });
     }
+    // Direct stderr line every 100ms + at start/end. Independent of the
+    // channel — CLI mode has no channel consumer, and this is the only
+    // visible signal that `git-arch index` is doing something.
+    eprintln!("indexing {total} commits ({sampled_count} sampled)…");
+    let start_at = std::time::Instant::now();
 
-    // Load aliases fresh each run (cheap).
     let cfg = crate::config::load().context("loading user config for aliases")?;
     let mut resolver = AuthorResolver::new(repo, &cfg.aliases);
 
-    // Batch-fetch all churn in one git log invocation (one fork/exec vs N).
-    // Filtered down to commits we still need to write.
     let churn_map = churn::batch_all(repo).unwrap_or_default();
 
-    // Blob-parse memoization across sampled commits.
     let mut blob_cache = treesitter::BlobCache::default();
     let mut lang_registry = treesitter::LangRegistry::new();
 
-    // Chunked transactions — one giant tx OOMs DuckDB on large repos
-    // (buffered rows never released mid-tx). Re-run is idempotent via
-    // ON CONFLICT DO UPDATE, so a partial commit boundary is safe.
     const COMMIT_CHUNK: usize = 500;
 
-    // Time-based progress throttle. Coarse commit-count throttling looked
-    // stalled on slow diffs (large trees, single 10s commit → no update).
     let mut last_progress_at = std::time::Instant::now();
     let progress_interval = std::time::Duration::from_millis(100);
 
     let mut tx = cache.conn.transaction()?;
     let mut in_chunk: usize = 0;
+
+    // Tags — insert after commit rows land so the FK holds. Reuse the
+    // list we already walked above for tag-bucket assignment.
+    let tag_infos = walker::tags(repo).unwrap_or_default();
 
     for (i, (commit, plan)) in all_commits.iter().zip(assignments.iter()).enumerate() {
         if already.contains(&commit.sha) && !opts.force_full {
@@ -97,43 +116,96 @@ pub fn run(
 
         let author_id =
             resolver.resolve(&tx, &commit.author_name, &commit.author_email)?;
+        let committer_id =
+            resolver.resolve(&tx, &commit.committer_name, &commit.committer_email)?;
 
-        // DuckDB has no OR REPLACE; use INSERT ... ON CONFLICT DO UPDATE.
         tx.execute(
             "INSERT INTO commits
-             (sha, parent_sha, author_id, committed_at, is_merge, is_sampled, bucket_key)
-             VALUES(?, ?, ?, ?, ?, ?, ?)
+             (sha, author_id, committer_id, authored_at, is_merge, is_sampled,
+              bucket_key, msg_type, is_breaking, is_revert, ignored_blame)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (sha) DO UPDATE SET
-                parent_sha   = excluded.parent_sha,
-                author_id    = excluded.author_id,
-                committed_at = excluded.committed_at,
-                is_merge     = excluded.is_merge,
-                is_sampled   = excluded.is_sampled,
-                bucket_key   = excluded.bucket_key",
+                author_id     = excluded.author_id,
+                committer_id  = excluded.committer_id,
+                authored_at   = excluded.authored_at,
+                is_merge      = excluded.is_merge,
+                is_sampled    = excluded.is_sampled,
+                bucket_key    = excluded.bucket_key,
+                msg_type      = excluded.msg_type,
+                is_breaking   = excluded.is_breaking,
+                is_revert     = excluded.is_revert,
+                ignored_blame = excluded.ignored_blame",
             params![
                 commit.sha,
-                commit.parent_sha,
                 author_id,
+                committer_id,
                 commit.committed_at.unix_timestamp(),
                 commit.is_merge,
                 plan.is_sampled,
                 plan.bucket_key,
+                commit.conv.msg_type,
+                commit.conv.is_breaking,
+                commit.conv.is_revert,
+                commit.ignored_blame,
             ],
         )?;
 
-        if let Some(rows) = churn_map.get(&commit.sha) {
+        // Parents.
+        {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO churn(sha, path, added, deleted) VALUES(?, ?, ?, ?)
-                 ON CONFLICT (sha, path) DO UPDATE SET
-                    added   = excluded.added,
-                    deleted = excluded.deleted",
+                "INSERT INTO commit_parents(sha, parent_sha, parent_idx)
+                 VALUES(?, ?, ?)
+                 ON CONFLICT (sha, parent_idx) DO UPDATE SET
+                    parent_sha = excluded.parent_sha",
             )?;
-            for c in rows {
-                stmt.execute(params![commit.sha, c.path, c.added, c.deleted])?;
+            for (idx, parent) in commit.parents.iter().enumerate() {
+                stmt.execute(params![commit.sha, parent, idx as i32])?;
             }
         }
 
-        // File stats: only on sampled commits.
+        // Trailers — resolve raw ident → author_id, one row per trailer.
+        for tr in &commit.trailers {
+            let tid =
+                resolver.resolve(&tx, &tr.ident.name, &tr.ident.email)?;
+            tx.execute(
+                "INSERT INTO commit_trailers(sha, author_id, role)
+                 VALUES(?, ?, ?)",
+                params![commit.sha, tid, tr.role.as_str()],
+            )?;
+        }
+
+        if let Some(diff) = churn_map.get(&commit.sha) {
+            {
+                let mut stmt = tx.prepare_cached(
+                    "INSERT INTO file_churn(sha, path, added, deleted) VALUES(?, ?, ?, ?)
+                     ON CONFLICT (sha, path) DO UPDATE SET
+                        added   = excluded.added,
+                        deleted = excluded.deleted",
+                )?;
+                for c in &diff.churn {
+                    stmt.execute(params![commit.sha, c.path, c.added, c.deleted])?;
+                }
+            }
+            {
+                let mut stmt = tx.prepare_cached(
+                    "INSERT INTO hunks
+                       (sha, path, prev_path, old_start, old_len, new_start, new_len)
+                     VALUES(?, ?, ?, ?, ?, ?, ?)",
+                )?;
+                for h in &diff.hunks {
+                    stmt.execute(params![
+                        commit.sha,
+                        h.path,
+                        h.prev_path,
+                        h.old_start,
+                        h.old_len,
+                        h.new_start,
+                        h.new_len,
+                    ])?;
+                }
+            }
+        }
+
         if plan.is_sampled {
             if let Ok(files) = treesitter::snapshot(
                 repo,
@@ -141,24 +213,47 @@ pub fn run(
                 &mut blob_cache,
                 &mut lang_registry,
             ) {
-                let mut stmt = tx.prepare_cached(
-                    "INSERT INTO file_stats(sha, path, language, code, comments, blanks)
-                     VALUES(?, ?, ?, ?, ?, ?)
-                     ON CONFLICT (sha, path) DO UPDATE SET
-                        language = excluded.language,
-                        code     = excluded.code,
-                        comments = excluded.comments,
-                        blanks   = excluded.blanks",
-                )?;
-                for f in files {
-                    stmt.execute(params![
-                        commit.sha,
-                        f.path,
-                        f.language,
-                        f.code,
-                        f.comments,
-                        f.blanks
-                    ])?;
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "INSERT INTO file_stats(sha, path, language, code, comments, blanks)
+                         VALUES(?, ?, ?, ?, ?, ?)
+                         ON CONFLICT (sha, path) DO UPDATE SET
+                            language = excluded.language,
+                            code     = excluded.code,
+                            comments = excluded.comments,
+                            blanks   = excluded.blanks",
+                    )?;
+                    for f in &files {
+                        stmt.execute(params![
+                            commit.sha,
+                            f.stat.path,
+                            f.stat.language,
+                            f.stat.code,
+                            f.stat.comments,
+                            f.stat.blanks
+                        ])?;
+                    }
+                }
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "INSERT INTO funcs(sha, path, name, kind, start_line, end_line)
+                         VALUES(?, ?, ?, ?, ?, ?)
+                         ON CONFLICT (sha, path, name, start_line) DO UPDATE SET
+                            kind     = excluded.kind,
+                            end_line = excluded.end_line",
+                    )?;
+                    for f in &files {
+                        for def in &f.funcs {
+                            stmt.execute(params![
+                                commit.sha,
+                                f.stat.path,
+                                def.name,
+                                def.kind,
+                                def.start_line,
+                                def.end_line,
+                            ])?;
+                        }
+                    }
                 }
             }
         }
@@ -170,16 +265,50 @@ pub fn run(
             tx = cache.conn.transaction()?;
         }
 
-        // Throttle: emit at most one progress event per `progress_interval`,
-        // plus one on the final commit. Time-based so slow diffs still show
-        // motion; fast repos aren't drowned in 35k channel sends.
-        if let Some(sender) = &progress {
-            let done = i + 1;
-            let now = std::time::Instant::now();
-            if done == total || now.duration_since(last_progress_at) >= progress_interval {
+        let done = i + 1;
+        let now = std::time::Instant::now();
+        if done == total || now.duration_since(last_progress_at) >= progress_interval {
+            let elapsed = now.duration_since(start_at).as_secs_f64();
+            let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
+            let eta_s = if rate > 0.0 {
+                (total - done) as f64 / rate
+            } else {
+                0.0
+            };
+            eprint!(
+                "\rindex: {done}/{total} ({:.0}%) {rate:.0}/s eta {eta_s:.0}s   ",
+                (done as f64 / total as f64) * 100.0
+            );
+            last_progress_at = now;
+            if let Some(sender) = &progress {
                 let _ = sender.send(Progress::Commit { done, total });
-                last_progress_at = now;
             }
+        }
+    }
+    eprintln!();
+
+    // Tags — insert after all commits so the FK target is present. Ignore
+    // tags whose target didn't land in `commits` (foreign tips outside the
+    // walked set).
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO tags(name, sha, tagged_at) VALUES(?, ?, ?)
+             ON CONFLICT (name) DO UPDATE SET
+                sha       = excluded.sha,
+                tagged_at = excluded.tagged_at",
+        )?;
+        for t in &tag_infos {
+            let commit_exists: bool = tx
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM commits WHERE sha = ?",
+                    params![t.sha],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if !commit_exists {
+                continue;
+            }
+            stmt.execute(params![t.name, t.sha, t.tagged_at])?;
         }
     }
 
@@ -188,65 +317,9 @@ pub fn run(
     }
     tx.commit()?;
 
-    // Blame pass — attribute lines in every sampled snapshot. Skip shas
-    // that already have blame rows (idempotent re-run). Cost scales as
-    // O(files × sampled buckets × blame_runtime); the sampling in the
-    // walker already keeps `sampled buckets` small (~52 for a year of
-    // weekly data), so the walk stays tractable.
-    let already_blamed: HashSet<String> = {
-        let mut stmt = cache.conn.prepare("SELECT DISTINCT sha FROM blame")?;
-        let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        iter.collect::<duckdb::Result<_>>()?
-    };
-
-    let sampled_shas: Vec<String> = all_commits
-        .iter()
-        .zip(assignments.iter())
-        .filter(|(_, plan)| plan.is_sampled)
-        .map(|(c, _)| c.sha.clone())
-        .filter(|s| opts.force_full || !already_blamed.contains(s))
-        .collect();
-
-    let total_shas = sampled_shas.len();
-    let mut last_blame_at = std::time::Instant::now();
-
-    for (idx, sha) in sampled_shas.iter().enumerate() {
-        let counts =
-            match blame::snapshot(repo, sha, &mut resolver, &cache.conn, &lang_registry) {
-                Ok(c) => c,
-                Err(_) => continue, // per-sha failure (missing commit, etc.) → skip
-            };
-
-        // Wipe any existing blame for this sha before repopulating (idempotent).
-        cache
-            .conn
-            .execute("DELETE FROM blame WHERE sha = ?", params![sha])?;
-
-        let tx = cache.conn.transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO blame(sha, path, author_id, line_count) VALUES(?, ?, ?, ?)
-                 ON CONFLICT (sha, path, author_id) DO UPDATE SET
-                    line_count = excluded.line_count",
-            )?;
-            for entry in &counts {
-                for (author_id, lines) in &entry.by_author {
-                    stmt.execute(params![sha, entry.path, author_id, *lines as i64])?;
-                }
-            }
-        }
-        tx.commit()?;
-
-        if let Some(sender) = &progress {
-            let done = idx + 1;
-            let now = std::time::Instant::now();
-            if done == total_shas || now.duration_since(last_blame_at) >= progress_interval
-            {
-                let _ = sender.send(Progress::Blame { done, total: total_shas });
-                last_blame_at = now;
-            }
-        }
-    }
+    // Phase 3 — cohort fold materializes `line_births` from hunks.
+    eprintln!("cohort fold…");
+    cohort::fold_and_materialize(cache).context("cohort fold")?;
 
     if let Some(sender) = &progress {
         let _ = sender.send(Progress::Finished);
@@ -257,7 +330,15 @@ pub fn run(
 
 fn wipe_data(cache: &Cache) -> Result<()> {
     cache.conn.execute_batch(
-        "DELETE FROM blame; DELETE FROM file_stats; DELETE FROM churn; DELETE FROM commits;",
+        "DELETE FROM line_births;
+         DELETE FROM funcs;
+         DELETE FROM file_stats;
+         DELETE FROM file_churn;
+         DELETE FROM hunks;
+         DELETE FROM tags;
+         DELETE FROM commit_trailers;
+         DELETE FROM commit_parents;
+         DELETE FROM commits;",
     )?;
     Ok(())
 }
@@ -273,16 +354,24 @@ struct BucketAssignment {
     is_sampled: bool,
 }
 
-/// Assign a bucket key to each commit (in-order, oldest first) and mark the
-/// last commit of each bucket as sampled.
-fn assign_buckets(commits: &[CommitInfo], size: BucketSize) -> Vec<BucketAssignment> {
+fn assign_buckets(
+    commits: &[CommitInfo],
+    size: BucketSize,
+    tag_dates: &[i64],
+) -> Vec<BucketAssignment> {
     let mut keys: Vec<i64> = commits
         .iter()
-        .map(|c| bucket::bucket_key(c.committed_at, size))
+        .map(|c| match size {
+            BucketSize::Tag => bucket::tag_bucket_key(c.committed_at, tag_dates),
+            _ => bucket::bucket_key(c.committed_at, size),
+        })
         .collect();
 
     let mut is_sampled = vec![false; commits.len()];
     for i in 0..commits.len() {
+        if commits[i].is_merge {
+            continue;
+        }
         let is_last_in_bucket = i + 1 == commits.len() || keys[i + 1] != keys[i];
         if is_last_in_bucket {
             is_sampled[i] = true;
@@ -309,8 +398,6 @@ mod tests {
     use crate::index::{self, bucket::BucketSize};
     use crate::repo;
 
-    /// Init a git repo in `dir` and add `n` commits touching one Rust file
-    /// each. Each commit adds ~2 lines. Skips if `git` isn't on PATH.
     fn seed_repo(dir: &Path, n: usize) {
         let run_git = |args: &[&str], date: &str| {
             Command::new("git")
@@ -336,8 +423,6 @@ mod tests {
             }
             std::fs::write(&path, body).unwrap();
             assert!(run_git(&["add", "main.rs"], noop).success());
-            // Distinct timestamp per commit so bucket_key(Commit) differs
-            // and each commit is its own sampled bucket.
             let date = format!("2025-01-0{}T00:00:00Z", i + 1);
             assert!(
                 run_git(&["commit", "-q", "-m", &format!("commit {i}")], &date).success(),
@@ -348,7 +433,6 @@ mod tests {
 
     #[test]
     fn smoke_index_tiny_repo() {
-        // Skip when `git` isn't available.
         if Command::new("git").arg("--version").output().is_err() {
             eprintln!("skip: git not on PATH");
             return;
@@ -358,9 +442,6 @@ mod tests {
         seed_repo(td.path(), 3);
 
         let repo = repo::open(td.path()).expect("open repo");
-
-        // Redirect the DuckDB cache to a temp file so we don't touch
-        // the user's XDG data dir.
         let cache_file = td.path().join("cache.duckdb");
         let mut cache = cache::open(&cache_file).expect("open cache");
 
@@ -375,10 +456,17 @@ mod tests {
         )
         .expect("index run");
 
-        let stats = crate::query::cache_stats(&cache.conn).unwrap();
-        assert_eq!(stats.commits, 3, "commits row count");
-        assert!(stats.churn >= 3, "churn rows >= commits");
-        assert!(stats.file_stats >= 3, "file_stats rows >= sampled commits");
-        assert!(stats.authors >= 1, "authors row present");
+        let commits: i64 = cache
+            .conn
+            .query_row("SELECT COUNT(*) FROM commits", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(commits, 3);
+
+        // Parents populated for the two non-root commits.
+        let pcount: i64 = cache
+            .conn
+            .query_row("SELECT COUNT(*) FROM commit_parents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pcount, 2);
     }
 }

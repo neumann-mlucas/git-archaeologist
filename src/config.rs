@@ -6,20 +6,12 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub default_bucket: String,
-    pub default_view: String,
-    pub default_group: String,
-    pub default_lens: String,
-    pub palette: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             default_bucket: "auto".into(),
-            default_view: "cumulative".into(),
-            default_group: "language".into(),
-            default_lens: "structure".into(),
-            palette: "default".into(),
         }
     }
 }
@@ -50,33 +42,6 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    pub fn palette_kind(&self) -> crate::ui::palette::PaletteKind {
-        crate::ui::palette::PaletteKind::parse(&self.config.palette)
-    }
-
-    pub fn default_view(&self) -> crate::query::View {
-        match self.config.default_view.trim().to_lowercase().as_str() {
-            "delta" => crate::query::View::Delta,
-            _ => crate::query::View::Cumulative,
-        }
-    }
-
-    pub fn default_group(&self) -> crate::query::GroupBy {
-        match self.config.default_group.trim().to_lowercase().as_str() {
-            "author" => crate::query::GroupBy::Author,
-            "module" => crate::query::GroupBy::Module,
-            _ => crate::query::GroupBy::Language,
-        }
-    }
-
-    pub fn default_lens(&self) -> crate::query::Lens {
-        match self.config.default_lens.trim().to_lowercase().as_str() {
-            "activity" | "churn" => crate::query::Lens::Activity,
-            "ownership" | "author" | "blame" => crate::query::Lens::Ownership,
-            _ => crate::query::Lens::Structure,
-        }
-    }
-
     pub fn default_bucket(&self) -> Option<crate::index::bucket::BucketSize> {
         crate::index::bucket::BucketSize::parse(&self.config.default_bucket)
     }
@@ -98,7 +63,8 @@ pub fn load() -> Result<Loaded> {
 }
 
 fn read_toml<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
     let val = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(val)
 }

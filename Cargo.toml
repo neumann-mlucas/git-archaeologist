@@ -2,18 +2,22 @@
 name = "git-archaeologist"
 version = "0.1.0"
 edition = "2021"
-description = "Interactive TUI to explore the evolution of a git repository"
+description = "Fast CLI that extracts every interesting time series out of a git repository — LOC, cohort survival, coupling, hotspot, classify — as TSV/CSV/JSON/Parquet"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/neumann-mlucas/git-archaeologist"
+homepage = "https://github.com/neumann-mlucas/git-archaeologist"
 readme = "README.md"
 rust-version = "1.85"
+keywords = ["git", "analytics", "cohort", "duckdb", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["neumann-mlucas <neumann.m.lucas@gmail.com>"]
+
+[[bin]]
+name = "git-archaeologist"
+path = "src/main.rs"
 
 [dependencies]
-# TUI
-ratatui = "0.28"
-crossterm = "0.28"
-
-# Git
+# Git — pure-Rust, hunks + rename via blob_diff.
 gix = { version = "0.66", default-features = false, features = [
     "max-performance-safe",
     "mailmap",
@@ -21,9 +25,8 @@ gix = { version = "0.66", default-features = false, features = [
     "blob-diff",
 ] }
 
-# Language parsing — tree-sitter grammars. Each grammar is a C blob compiled
-# at build time; first build adds a few minutes. Long tail added in Slice 4
-# Step C.
+# Tree-sitter — 7 built-in grammars per SPEC §Language stack. Post-v1
+# grammars will land behind Cargo features.
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
@@ -32,23 +35,19 @@ tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-ruby = "0.23"
-tree-sitter-bash = "0.25"
-tree-sitter-html = "0.23"
-tree-sitter-css = "0.25"
-tree-sitter-json = "0.24"
-tree-sitter-yaml = "0.7"
-tree-sitter-toml-ng = "0.7"
-tree-sitter-md = "0.5"
-tree-sitter-scala = "0.26"
-tree-sitter-haskell = "0.23"
-tree-sitter-zig = "1"
 
-# Cache — OLAP columnar embedded engine. `bundled` compiles libduckdb from
-# source via cc-rs (no cmake needed). First build is slow (5-15 min) but
-# incremental builds hit sccache.
-duckdb = { version = "1", features = ["bundled"] }
+# Cache — OLAP columnar embedded engine. Unbundled: `cargo dist` runners
+# link libduckdb at build time so end-user prebuilt binaries need nothing
+# installed. `cargo install` fallback requires libduckdb on the host.
+duckdb = "1"
+
+# Concurrency
+rayon = "1"
+crossbeam-channel = "0.5"
+
+# Diff — line hunks. Already transitive via gix; making it a direct dep so
+# we can build a custom Sink over blob pairs.
+imara-diff = "0.1"
 
 # Time
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
@@ -69,12 +68,8 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Concurrency utils
-crossbeam-channel = "0.5"
-
 [dev-dependencies]
 tempfile = "3"
-assert_cmd = "2"
 
 [profile.release]
 lto = "thin"
