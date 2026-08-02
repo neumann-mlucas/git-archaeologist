@@ -260,7 +260,14 @@ pub fn batch_sampled(
     }
 
     // Phase 2: parse each unique blob in parallel.
+    // Build oid→sample-path map once (O(N)) — earlier version scanned
+    // per_sha per blob (O(unique × sha × entries)), which on ratatui
+    // was O(10k × 300 × 200) = 600M ops just to look up a path.
     let git_dir: PathBuf = repo.git.path().to_path_buf();
+    let oid_to_path: HashMap<gix::ObjectId, String> = per_sha
+        .values()
+        .flat_map(|entries| entries.iter().map(|(p, o)| (*o, p.clone())))
+        .collect();
     let unique_vec: Vec<gix::ObjectId> = unique.into_iter().collect();
     let parse_pairs: Vec<(gix::ObjectId, Option<CachedParse>)> = unique_vec
         .par_iter()
@@ -272,15 +279,9 @@ pub fn batch_sampled(
                 )
             },
             |(git, reg), oid| {
-                // A blob may be classifiable under multiple paths (rare);
-                // pick any path from a commit that has it. Language spec
-                // is by extension so this is stable across the aliases.
-                let sample_path = per_sha
-                    .values()
-                    .find_map(|entries| {
-                        entries.iter().find(|(_, o)| o == oid).map(|(p, _)| p.clone())
-                    })
-                    .unwrap_or_default();
+                // A blob may be classifiable under multiple paths (rare).
+                // Language spec is by extension so this pick is stable.
+                let sample_path = oid_to_path.get(oid).cloned().unwrap_or_default();
                 let parsed = parse_blob(git, *oid, &sample_path, reg);
                 (*oid, parsed)
             },
