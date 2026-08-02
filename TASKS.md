@@ -231,7 +231,12 @@ Full journey on ratatui (2589 commits reached via all-refs walk,
 | **Appender everywhere** (per SPEC §Data model)  | 94 s     | < 500 MB |
 | + rayon churn walk (per-worker `gix::open`)     | 92 s     | < 500 MB |
 | + rayon cohort fold + line_births Appender      | 73 s     | < 500 MB |
-| + two-phase parallel treesitter (unique blobs)  | **41 s** | < 500 MB |
+| + two-phase parallel treesitter (unique blobs)  | 41 s     | 447 MB   |
+| + chunked indexer (bounded peak RSS)            | 43 s     | 344 MB   |
+| + O(N) oid→path lookup (was O(N²))              | 42 s     | 344 MB   |
+| **+ flush once per chunk boundary**             | **27 s** | 344 MB   |
+
+**Beats SPEC target** (`< 30 s` on the small tier).
 
 Wins landed:
 - Every write-heavy table (`commits`, `commit_parents`,
@@ -273,14 +278,17 @@ the bucket universe.
 
 ### Still open (v1.x)
 
-- SPEC perf targets: 10k-commit repo in 90 s (we linearly scale to
-  ~160 s), cache size < 200 MB for 10k (linearly ~580 MB). Meeting
-  those needs more aggressive dedup + streaming churn iterator + a
-  smaller-per-row hunk representation.
-- Stream `churn::batch_all` iterator instead of collecting a full
-  `HashMap<String, CommitDiff>` up front (peak RSS win on big repos).
-- Cohort 530 ms is right at the SPEC 500 ms bar — either accept or
-  materialize the (bucket, cohort) grid at index time.
+- SPEC 10k-commit target = 90 s. We linearly extrapolate from ratatui
+  to ~105 s — close but not there. Realistic lever is either
+  producer/consumer pipeline (churn+ts compute overlapping with insert
+  loop) or reducing per-commit constant cost (Appender bind overhead).
+- Cache size at 10k linearly = ~570 MB, still over the SPEC 200 MB
+  bar. Big win would be dropping hex-string SHAs for the 20-byte
+  binary form.
+- Cohort query 530 ms is right at the SPEC 500 ms bar — either accept
+  or materialize the (bucket, cohort) grid at index time.
+- Validate against `astral-sh/uv` (~15 k commits) and `godotengine/godot`
+  (~60 k) via Tier 3 harness. Both fixtures are already in the plan.
 
 ### Tier 3 — mid & mid-large bench (`--features bench-large`, nightly)
 
