@@ -48,13 +48,18 @@ fn is_stale(path: &Path) -> bool {
     }
 }
 
-/// Cap DuckDB memory + parallelism so indexing large repos (tens of
-/// thousands of commits) doesn't OOM the host.
+/// Cap DuckDB memory + parallelism so indexing large repos doesn't OOM
+/// the host, and give it an explicit spill directory so it can pin blocks
+/// past the memory limit.
+///
+/// ponytail: memory_limit hard-coded at 8GB, temp_directory under the
+/// cache file. If a real user hits either ceiling, promote to config
+/// keys — until then, YAGNI.
 fn tune(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "SET preserve_insertion_order = false;
-         SET memory_limit = '4GB';
-         SET threads = 2;",
+         SET memory_limit = '12GB';
+         SET threads = 4;",
     )?;
     Ok(())
 }

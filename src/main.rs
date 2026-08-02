@@ -24,6 +24,7 @@ const TABLES: &[&str] = &[
     "file_churn",
     "file_stats",
     "funcs",
+    "line_births",
 ];
 
 #[derive(Parser, Debug)]
@@ -189,33 +190,43 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let repo = repo::open(&cli.repo)?;
+    if repo.is_shallow() {
+        eprintln!("warning: shallow clone — history truncated, metrics degrade at the horizon");
+    }
     let mut cache = cache::open(repo.cache_path())?;
+    // Config load is best-effort — missing/broken user config falls back to
+    // defaults so `git-arch` still runs.
+    let cfg = config::load().unwrap_or_else(|_| config::Loaded {
+        config: config::Config::default(),
+        aliases: config::Aliases::default(),
+    });
+    let cfg_bucket = cfg.default_bucket();
 
     match cli.cmd {
-        Cmd::Index(args) => run_index(&repo, &mut cache, args, false),
-        Cmd::Reindex(args) => run_index(&repo, &mut cache, args, true),
+        Cmd::Index(args) => run_index(&repo, &mut cache, args, cfg_bucket, false),
+        Cmd::Reindex(args) => run_index(&repo, &mut cache, args, cfg_bucket, true),
         Cmd::Export { format, dir } => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, cfg_bucket, false)?;
             run_export(&mut cache, format, &dir)
         }
         Cmd::Sql { query, format } => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, cfg_bucket, false)?;
             run_sql(&cache, &query, FormatArg::resolve(format))
         }
         Cmd::Classify(q) => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let filters = build_filters(&q)?;
             let table = query::classify(&cache, &filters)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Age(q) => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let filters = build_filters(&q)?;
             let table = query::age(&cache, &filters)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Churn(q) => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let by = q.by.clone().unwrap_or_else(|| "module".to_string());
             let filters = build_filters(&q)?;
             let table = query::churn(&cache, &filters, &by)?;
@@ -226,38 +237,51 @@ fn main() -> Result<()> {
             top,
             max_files_per_commit,
         } => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let filters = build_filters(&q)?;
             let table = query::coupling(&cache, &filters, top, max_files_per_commit)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Burndown(q) => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let by = q.by.clone().unwrap_or_else(|| "language".to_string());
             let filters = build_filters(&q)?;
             let table = query::burndown(&cache, &filters, &by)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Hotspot { q, top } => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            if q.lang.is_none() {
+                bail!("hotspot requires --lang <L>");
+            }
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let filters = build_filters(&q)?;
             let table = query::hotspot(&cache, &filters, top)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Cohort(q) => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let filters = build_filters(&q)?;
             let table = query::cohort(&cache, &filters)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Survival { q, fit } => {
-            ensure_indexed(&repo, &mut cache, None, false)?;
+            ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
             let filters = build_filters(&q)?;
-            let fit_exp = fit.as_deref().map(|s| s.eq_ignore_ascii_case("exp")).unwrap_or(false);
+            let fit_exp = match fit.as_deref() {
+                None => false,
+                Some(s) if s.eq_ignore_ascii_case("exp") => true,
+                Some(other) => bail!("--fit must be 'exp', got {other:?}"),
+            };
             let table = query::survival(&cache, &filters, fit_exp)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
     }
+}
+
+/// Resolve bucket override for a query subcommand.
+/// Priority: CLI `--bucket` > config `default_bucket` > None (auto).
+fn pick_bucket(q: &QueryArgs, cfg: Option<BucketSize>) -> Option<BucketSize> {
+    q.bucket.and_then(BucketArg::resolve).or(cfg)
 }
 
 fn build_filters(q: &QueryArgs) -> Result<query::Filters> {
@@ -278,14 +302,16 @@ fn run_index(
     repo: &repo::Repo,
     cache: &mut cache::Cache,
     args: IndexArgs,
+    cfg_bucket: Option<BucketSize>,
     force_full: bool,
 ) -> Result<()> {
+    let bucket = args.bucket.and_then(BucketArg::resolve).or(cfg_bucket);
     index::run(
         repo,
         cache,
         index::IndexOptions {
             force_full,
-            bucket_override: args.bucket.and_then(BucketArg::resolve),
+            bucket_override: bucket,
         },
         None,
     )

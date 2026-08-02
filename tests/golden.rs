@@ -522,6 +522,7 @@ fn tier1_golden_integration() {
         "file_churn",
         "file_stats",
         "funcs",
+        "line_births",
     ] {
         let p = out_dir.join(format!("{table}.parquet"));
         assert!(p.exists(), "missing parquet: {}", p.display());

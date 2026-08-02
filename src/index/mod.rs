@@ -97,10 +97,33 @@ pub fn run(
     let mut blob_cache = treesitter::BlobCache::default();
     let mut lang_registry = treesitter::LangRegistry::new();
 
-    const COMMIT_CHUNK: usize = 500;
+    // Tx flush cadence. Small enough that hunks from a bulky commit don't
+    // build up in a single transaction and blow past DuckDB's memory
+    // limit; large enough to amortize per-tx overhead.
+    // ponytail: constant, not a knob, until a real repo shows 100 is wrong.
+    const COMMIT_CHUNK: usize = 100;
 
     let mut last_progress_at = std::time::Instant::now();
     let progress_interval = std::time::Duration::from_millis(100);
+
+    // Drop secondary indexes on high-write tables during bulk insert;
+    // rebuild at the end. DuckDB pays index maintenance in memory per
+    // insert; on a 5k-commit repo the hunks index alone was the OOM
+    // hotspot. Recreate identically to schema.rs.
+    cache.conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_hunks_sha_path;
+         DROP INDEX IF EXISTS idx_hunks_path;
+         DROP INDEX IF EXISTS idx_file_churn_path;
+         DROP INDEX IF EXISTS idx_file_stats_lang;
+         DROP INDEX IF EXISTS idx_file_stats_path;
+         DROP INDEX IF EXISTS idx_funcs_path;
+         DROP INDEX IF EXISTS idx_trailers_sha;
+         DROP INDEX IF EXISTS idx_commits_ts;
+         DROP INDEX IF EXISTS idx_commits_bucket;
+         DROP INDEX IF EXISTS idx_commits_author;
+         DROP INDEX IF EXISTS idx_line_births_bucket;
+         DROP INDEX IF EXISTS idx_line_births_path;",
+    )?;
 
     let mut tx = cache.conn.transaction()?;
     let mut in_chunk: usize = 0;
@@ -261,6 +284,11 @@ pub fn run(
         in_chunk += 1;
         if in_chunk >= COMMIT_CHUNK {
             tx.commit()?;
+            // Force a checkpoint after every chunk so DuckDB releases
+            // per-tx page buffers back to the OS. Without this, memory
+            // grows monotonically across a long index run and OOMs on
+            // mid-size repos before finish.
+            cache.conn.execute_batch("CHECKPOINT;")?;
             in_chunk = 0;
             tx = cache.conn.transaction()?;
         }
@@ -317,9 +345,30 @@ pub fn run(
     }
     tx.commit()?;
 
+    // Rebuild secondary indexes after bulk write completes. Query paths
+    // downstream (cohort fold, subcommand queries) depend on them.
+    cache.conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_commits_ts     ON commits(authored_at);
+         CREATE INDEX IF NOT EXISTS idx_commits_bucket ON commits(bucket_key);
+         CREATE INDEX IF NOT EXISTS idx_commits_author ON commits(author_id);
+         CREATE INDEX IF NOT EXISTS idx_trailers_sha   ON commit_trailers(sha);
+         CREATE INDEX IF NOT EXISTS idx_hunks_sha_path ON hunks(sha, path);
+         CREATE INDEX IF NOT EXISTS idx_hunks_path     ON hunks(path);
+         CREATE INDEX IF NOT EXISTS idx_file_churn_path ON file_churn(path);
+         CREATE INDEX IF NOT EXISTS idx_file_stats_lang ON file_stats(language);
+         CREATE INDEX IF NOT EXISTS idx_file_stats_path ON file_stats(path);
+         CREATE INDEX IF NOT EXISTS idx_funcs_path      ON funcs(path);",
+    )?;
+
     // Phase 3 — cohort fold materializes `line_births` from hunks.
     eprintln!("cohort fold…");
     cohort::fold_and_materialize(cache).context("cohort fold")?;
+
+    // Recreate line_births indexes after the fold's bulk insert.
+    cache.conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_line_births_bucket ON line_births(birth_bucket);
+         CREATE INDEX IF NOT EXISTS idx_line_births_path   ON line_births(path);",
+    )?;
 
     if let Some(sender) = &progress {
         let _ = sender.send(Progress::Finished);

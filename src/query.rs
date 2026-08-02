@@ -435,17 +435,22 @@ pub fn cohort(cache: &Cache, filters: &Filters) -> Result<Table> {
 /// returns a scalar half-life when >= 100 deletion events, else NULL.
 pub fn survival(cache: &Cache, filters: &Filters, fit_exp: bool) -> Result<Table> {
     let path_filter = filters.path_where("lb.path");
+    let birth_path_filter = filters.path_where("h.path");
+    let commit_filter = filters.commit_where();
+    let author_join = filters.author_join();
 
     // Total lines ever born per cohort = lines still alive + all deletes
     // that touched files after cohort birth. Approximation: use total
     // per-bucket added (from hunks new_len sum where new_len > 0) as
-    // "births" and per-bucket deleted as "deaths".
+    // "births" and per-bucket deleted as "deaths". Filters restrict the
+    // cohort universe when supplied.
     let sql = format!(
         "WITH births AS (
              SELECT c.bucket_key AS cohort, SUM(h.new_len) AS born
              FROM   hunks h
              JOIN   commits c ON c.sha = h.sha
-             WHERE  h.new_len > 0
+             {author_join}
+             WHERE  h.new_len > 0 {commit_filter} {birth_path_filter}
              GROUP  BY c.bucket_key
          ),
          alive_now AS (
