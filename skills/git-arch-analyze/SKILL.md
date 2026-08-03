@@ -43,7 +43,7 @@ The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 | `survival-fit.tsv` | half-life scalar via exponential fit (or `reason` if <100 deaths) |
 | `coupling.tsv` | top-50 file pairs by co-commit |
 | `classify.tsv` | commits + fix/feat/revert/breaking/untyped per bucket |
-| `hotspot-rust.tsv` | top-30 Rust funcs by churn (empty if no Rust) |
+| `hotspot-<lang>.tsv` | top-30 funcs by churn, one file per tree-sitter lang present (rust, python, javascript, typescript, tsx, go, c, cpp, lua, vim-script, java, ruby, bash, php, ocaml, scala, haskell); langs with no data are dropped |
 | `age.tsv` | file age histogram, 7-day bins |
 | `churn-module.tsv` | added/deleted per top-level dir per bucket |
 | `churn-author.tsv` | added/deleted per author per bucket |
@@ -214,10 +214,10 @@ Report the regime, not the numbers: "Steady ~5 commits/mo for 3 yr, spiked to 40
 
 - Script exits non-zero on: not a git repo, bare repo, detached HEAD.
   Propagate the exact stderr line to the user and stop.
-- Indexer memory is now bounded (< 500 MB on ~3k-commit polyglot repos)
-  via the DuckDB Appender path. Very large repos (>50k commits) still
-  pay serial diff cost — expect roughly 30 s per 1k commits on a warm
-  dev box until rayon-parallel churn lands.
+- Indexer memory is bounded (< 500 MB on ~3k-commit polyglot repos) via
+  the DuckDB Appender path. Churn / cohort fold / tree-sitter run
+  rayon-parallel; expect roughly 10 s per 1k commits on a warm 8-core
+  dev box.
 
 ## Overrides
 

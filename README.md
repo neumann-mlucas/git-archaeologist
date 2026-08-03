@@ -177,14 +177,20 @@ raw = [
 
 ## Supported languages
 
-Tree-sitter is linked in for **7 languages** in v1:
+Tree-sitter is linked in for **20 languages** in v1:
 
-- Rust, Python, JavaScript, TypeScript (`.ts` + `.tsx`), Go, C, C++
+- **Core 9** (full function-level extraction): Rust, Python, JavaScript,
+  TypeScript (`.ts` + `.tsx`), Go, C, C++, Lua, Vim Script.
+- **Extended 11** (LOC + comment split; function extraction is best-effort
+  by conventional node names): Java, Ruby, Bash, HTML, CSS, JSON, PHP,
+  OCaml, Scala, Haskell, Markdown.
 
 Line-level metrics (burndown, churn, coupling, age, cohort, survival) work
 for any file the diff engine sees. Function-level metrics (hotspot,
-function-cohort, test-vs-code split) require tree-sitter and are limited to
-the seven above. Post-v1 grammars will land as opt-in Cargo features.
+function-cohort, test-vs-code split) rely on tree-sitter and only cover
+langs with `fn_kinds` set (all Core 9 + Java, Ruby, Bash, PHP, OCaml,
+Scala, Haskell). Post-v1 grammars land as pure adds — one Cargo line +
+one `LangSpec` entry each.
 
 ## Stack
 
@@ -193,7 +199,7 @@ the seven above. Post-v1 grammars will land as opt-in Cargo features.
 - [`tree-sitter`](https://tree-sitter.github.io) — per-language LOC + function extraction
 - [`imara-diff`](https://github.com/pascalkuthe/imara-diff) — hunk sink
 - [`clap`](https://docs.rs/clap) — CLI
-- [`rayon`](https://docs.rs/rayon) — concurrency (future: parallel indexer)
+- [`rayon`](https://docs.rs/rayon) — parallel churn walk, cohort fold, and tree-sitter snapshot
 
 ## Prior art we learn from
 

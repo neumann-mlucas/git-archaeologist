@@ -35,8 +35,8 @@ Answers questions like:
 - Metrics enumerated in §Metrics.
 - Output = parquet dump + subcommand-per-metric emitting TSV/CSV/JSON on
   stdout for piping.
-- Function-level metrics for the 7 languages with tree-sitter grammars
-  linked in.
+- Function-level metrics for the tree-sitter languages linked in
+  (§Language stack: Core 9 full + Extended 11 best-effort).
 
 ### Explicitly out of scope (v1)
 - **No TUI.** Deleted from the prior spec. Analyzer + pipeable output is
@@ -586,7 +586,7 @@ Justify every crate on the fence.
 |-------|-----|----------------------|
 | `gix` | pure-Rust git, no subprocess, gives hunks + rename via `blob_diff` | shell out to `git` — slower per-commit |
 | `duckdb` (unbundled) | columnar OLAP + parquet native + window fns; new metric = new query | `sqlite` (row-store, slow on aggregations); polars (no persistence story) |
-| `tree-sitter` + 7 grammars | required for function-level + exact comment split | regex (approximate, no function-level) |
+| `tree-sitter` + 20 grammars | required for function-level + exact comment split | regex (approximate, no function-level) |
 | `rayon` | per-commit parallelism | manual threading |
 | `clap` | CLI | — |
 | `plotters` | — | **rejected** — no plotting in v1 |
@@ -595,8 +595,9 @@ Justify every crate on the fence.
 | `time` | timestamps + tz | chrono |
 
 **Removed vs prior spec:** ratatui, crossterm, plotters (never added,
-now formally out), 12 of the 19 tree-sitter grammars currently linked
-(kept: Rust, Python, JS, TS, Go, C, C++).
+now formally out). Tree-sitter grammar set later re-expanded to 20
+(§Language stack) after the Core-9 landed cleanly and the +1 MB
+per-grammar cost stayed cheap; §Killed entry retired.
 
 **Distribution: prebuilt binaries via `cargo dist` are the primary
 install path.** Users download a static-linked binary from GitHub
@@ -625,7 +626,6 @@ dropped — first build no longer takes 5-15 minutes for either path.
   subcommands + `--by` flag.
 - Ownership lens as sha × path blame subprocess.
 - Delta view as a first-class mode (compute in SQL).
-- 20-grammar tree-sitter fan-out.
 - Language detection heuristics beyond ext map.
 - Sentiment / DTW / any ML.
 - Babelfish / UAST.

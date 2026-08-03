@@ -9,9 +9,10 @@ a green gate before the next starts.
 
 ## Decisions
 
-- **Grammars.** V1 built-in set = 7: Rust, Python, JavaScript,
-  TypeScript, Go, C, C++. Other 12 currently in `Cargo.toml` deleted
-  outright (not feature-gated) — post-v1 add-back per SPEC §Roadmap.
+- **Grammars.** V1 built-in set = 20 (SPEC §Language stack). Phase 0
+  cut back to Core 7 to shake out the pipeline; commit `de8a04c`
+  re-expanded to 20 (Core 9 full + Extended 11 best-effort) once the
+  +1 MB/grammar cost proved cheap.
 - **Blame.** Deferred to v1.2. Delete `src/index/blame.rs`, the `blame`
   table, and every query that touches it. No preview gate.
 - **Cache migration.** Auto-nuke stale caches on first v1 run; log one
@@ -331,8 +332,8 @@ reasoning.
 - `--module-depth` flag / `default_module_depth` — module = first path
   segment, no knob.
 - Bundled DuckDB compile path — `cargo dist` prebuilt binaries instead.
-- 19-grammar built-in fan-out — SPEC 7 built in (Rust, Py, JS, TS, Go,
-  C, C++), rest post-v1 Cargo features.
+- 19-grammar-then-shrink cycle — v1 now ships 20 grammars built in
+  (SPEC §Language stack); Phase 0's 7-grammar interim is history.
 - `unmerged_candidates` heuristic + AliasMerge modal — static
   `aliases.toml` covers it.
 - `commits.tz_offset_min` column — no v1 metric consumes it.
