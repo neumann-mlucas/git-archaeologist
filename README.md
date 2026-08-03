@@ -19,35 +19,51 @@ Every sample below is real output from a run against the
 buckets).** Indexer wall time on a dev laptop: ~4 min. Cache size:
 ~570 MB. Query latency: < 1 s.
 
-Sparklines below use 8-level braille (`▁▂▃▄▅▆▇█`) — each column is one
-week, decimated to fit 65 columns. Bars are `█` at 1× / 40-column scale.
+Tables below sample seven milestone years (2014 → 2026, every 2 yr).
+Bars (age, survival) are `█` at 1× / 40-column scale.
 
-### Overview: commits per week
+### Overview: commits per year
 
 ```
-▁▅▁▄▄▂▄▂▃▁▃▁▃▂▂▅▄▃▂▂▂▃▂▂▃▂▁▁▆▆▃▃▁▁▂▃▂▂▂▁▃▄▄▅▄▅▆▅▇▃▆▅▄▆▃▃▄▅█▆▄▄▄▇▆
-min=2  median=46  max=181  buckets=651
-first = 2014W05   last = 2026W31
+year      commits
+2014        2,139
+2015        1,714
+2016        1,798
+2017        2,491
+2018        1,911
+2019        2,383
+2020        1,680
+2021        2,273
+2022        3,681
+2023        3,961
+2024        3,235
+2025        3,626
+2026        2,918
+total      33,810   (non-merge; 651 weekly buckets)
 ```
 
-Produced by `git-archaeologist sql "SELECT bucket_key, COUNT(*) FROM
-commits WHERE NOT is_merge GROUP BY 1 ORDER BY 1"` piped to a sparkline.
+Commit volume roughly doubled from the 2014-2020 baseline (~2k / yr) to
+the 2022-2025 era (~3.5k / yr). 2026 is a partial year.
 
 ### `burndown`
 
-Cumulative LOC per bucket. `--by language | author | module`.
+Cumulative LOC per bucket. `--by language | author | module`. Top-5
+languages at year-end:
 
 ```
-Vim Script  ▁▁▁▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇█▇  peak=415,692  now=343,785
-Lua         ▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▂▂▂▂▂▂▃▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄▄▅▅▅▅▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇█  peak=331,067  now=331,067
-C           ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇█  peak=517,063  now=276,382
-Markdown    ▁▂▂▂▂▂▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▅▅▄▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▇▇▇▇▇█▅▆▆▆  peak=  3,171  now=  2,032
-Bash        ▁▁▁▁▁▁▁▁▂▂▂▂▃▃▃▄▅▅▅▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇█▇▇▇▇▇▆▆▆▅▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  peak=  2,183  now=  1,301
+year     Vim Script          Lua            C     Markdown         Bash
+2014        133,808        9,319      165,960          809          292
+2016        142,616       53,835      177,296        1,016          762
+2018        179,703       91,115      199,586        1,453        1,799
+2020        203,299      125,165      218,277        1,557        2,157
+2022        276,431      172,025      247,288        1,730        2,098
+2024        315,269      260,920      262,134        2,016        1,137
+2026        343,785      331,067      276,382        2,032        1,301
 ```
 
-Vim Script and Lua converge at ~340k lines. C peaked at 517k in ~2018
-and shrank by nearly half. Bash rose then fell — a script-consolidation
-episode.
+Lua closed a 156k-line gap on Vim Script from 2014 to 2026 and now sits
+within 4% of it. C grew steadily but far more slowly than Lua. Bash
+peaked around 2020 then shrank — a script-consolidation episode.
 
 ### `survival`
 
@@ -141,25 +157,40 @@ Added / deleted per group per bucket. `--by module | lang | author`.
 When `--by module`, `--depth N` (default `1`) controls path-segment
 granularity — `1` = top-level dir, `2` = one level deeper, and so on.
 
-`--by module --depth 1`:
+`--by module --depth 1`, net churn (added − deleted) per year for the
+top-4 modules ranked by lifetime activity (added + deleted):
 
 ```
-src          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁  +896,256  -796,079
-runtime      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▄▁▁▁▄▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▁▁  +795,115  -344,704
-test         ▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▂▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▂▁▁▂▂▂▁▂▁▅▁▂▃▅▃▃▂▂▂▄▄▅▇▁▅█▁▂▃▃▂  +507,430  -193,185
-third-party  ▁▂▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▁▁▄▁▁▁▁▁▁▁▁▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  +118,919  -184,243
+year               src         runtime            test     third-party
+2014          +604,534        +287,742         +30,247         -67,700
+2016           -61,362          +5,996         +50,279            +480
+2018           +44,244          +8,252         +10,050          +2,261
+2020            +4,900          +8,521          +9,725             +48
+2022           +44,788         +41,294         +23,224            -159
+2024           -27,993         +25,643         +56,171              +0
+2026           +12,243         +16,951         +37,578              +0
+
+net           +762,333        +529,720        +390,695         -65,617
+churn        2,991,229       1,399,496         893,239         306,133
 ```
 
 Same query at `--depth 2` — the story sharpens: `src/nvim` is the C
 core, `test/functional` is where the Lua-migration test churn lives,
-and `src/po` was a one-shot i18n import in the early weeks.
+`runtime/lua` grows every year from 2020 onward (Lua module rewrites),
+and `runtime/doc` was a one-shot import wave in 2014.
 
 ```
-src/nvim         ▁▁▁▁▂▁▁█▆▁▁▃▁▁▂▆▂▁▁▁▁▂▂▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▁▁▁▂▅▃▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁ +1,212,341  -955,535
-test/functional  ▁▁▁▁▃▁▁▁█▁▁▆▁▄▁▃▁▁▁▂▁▁▁▁▃▁▂▁▁▁▁▁▁▁▁▁▁▁▁▂▁▃▄▁▁▁▁▁▃▃▁▂▂▂▂▁▂▁▂▂   +490,894  -211,383
-runtime/doc      ▁▁▁▁▁▁▂▁▆▁▁▂▁▁█▃▁▁▅▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▂▁▁▂▁▁▁▁▁▁▂▄▂▃▁▁▁▂   +322,074  -178,099
-runtime/syntax   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   +220,002   -61,600
-src/po           █▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   +232,931    -4,885
+year         src/nvim   test/functional   runtime/doc   runtime/lua
+2014          +66,759            +4,774      +104,502            +0
+2016          -61,393           +48,163        +1,314            +0
+2018          +44,229            +9,544          +714           +14
+2020          +17,400            +9,411        +2,804        +4,139
+2022          +43,288           +23,041       +11,948        +9,350
+2024           +7,756           +34,876        +7,018        +9,298
+2026          +10,644           +25,785        +4,075        +9,588
+
+net          +256,806          +279,511      +143,975       +98,320
+churn       2,167,876           702,277       500,173       283,070
 ```
 
 Files with fewer than `depth` segments group under their full path
