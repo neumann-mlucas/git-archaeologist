@@ -125,6 +125,23 @@ git-arch sql "SELECT language, SUM(code)
               ORDER  BY 2 DESC"
 ```
 
+## Claude Code skill
+
+`skills/git-arch-analyze/` ships a Claude Code skill that indexes a repo,
+runs every subcommand, and writes an interpreted `ARCHAEOLOGY.md`
+report. To enable globally:
+
+```sh
+mkdir -p ~/.claude/skills
+ln -sf "$PWD/skills/git-arch-analyze" ~/.claude/skills/git-arch-analyze
+```
+
+Then invoke from any repo:
+
+```
+/git-arch-analyze [repo-path]
+```
+
 ## Cache
 
 DuckDB file under XDG data, keyed by canonical worktree path so multiple

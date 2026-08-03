@@ -13,13 +13,19 @@ description: >
 
 Two-step workflow:
 
-1. **Collect** — invoke `~/.claude/skills/git-arch-analyze/run.sh <repo>` (default: current working directory). The script indexes the repo, runs every subcommand, and dumps `.tsv` files into `/tmp/gitarch-<repo>-<ts>/`. It also prints the output directory path on its final line.
+1. **Collect** — invoke this skill's `run.sh <repo>` (default: current working directory). Script indexes the repo, runs every subcommand, dumps `.tsv` files into `/tmp/gitarch-<repo>-<ts>/`. Prints the output directory path on its final line.
 2. **Interpret** — read the dumped TSVs, then write a markdown report to `<repo>/ARCHAEOLOGY.md` (unless the user specifies otherwise). The report is the point of the skill — do not just paste tables.
 
 ## How to invoke
 
+Skill files live at `skills/git-arch-analyze/` in the git-archaeologist
+repo; the `~/.claude/skills/git-arch-analyze` entry is a symlink into
+that. Either path works:
+
 ```bash
 bash ~/.claude/skills/git-arch-analyze/run.sh [repo-path]
+# or, from the git-archaeologist repo:
+bash skills/git-arch-analyze/run.sh [repo-path]
 ```
 
 If no path given, the script uses `$PWD`. First run indexes; subsequent runs are cached and re-emit in a few seconds.
