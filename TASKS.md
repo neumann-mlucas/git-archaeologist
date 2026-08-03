@@ -256,21 +256,22 @@ subcommand + assertions) in ~100s on a dev box.
 Full journey on ratatui (2589 commits reached via all-refs walk,
 8-core dev box):
 
-| Path                                            | Wall     | Peak RSS |
-|-------------------------------------------------|----------|----------|
-| pre-fix (single long tx + prepared stmts)       | OOM      | 4-8 GB   |
-| Appender + 50-chunk tx                          | ~25 min  | 1.5 GB   |
-| **Appender everywhere** (per SPEC §Data model)  | 94 s     | < 500 MB |
-| + rayon churn walk (per-worker `gix::open`)     | 92 s     | < 500 MB |
-| + rayon cohort fold + line_births Appender      | 73 s     | < 500 MB |
-| + two-phase parallel treesitter (unique blobs)  | 41 s     | 447 MB   |
-| + chunked indexer (bounded peak RSS)            | 43 s     | 344 MB   |
-| + O(N) oid→path lookup (was O(N²))              | 42 s     | 344 MB   |
-| **+ flush once per chunk boundary**             | **27 s** | 344 MB   |
+| Path                                           | Wall     | Peak RSS |
+| ---------------------------------------------- | -------- | -------- |
+| pre-fix (single long tx + prepared stmts)      | OOM      | 4-8 GB   |
+| Appender + 50-chunk tx                         | ~25 min  | 1.5 GB   |
+| **Appender everywhere** (per SPEC §Data model) | 94 s     | < 500 MB |
+| + rayon churn walk (per-worker `gix::open`)    | 92 s     | < 500 MB |
+| + rayon cohort fold + line_births Appender     | 73 s     | < 500 MB |
+| + two-phase parallel treesitter (unique blobs) | 41 s     | 447 MB   |
+| + chunked indexer (bounded peak RSS)           | 43 s     | 344 MB   |
+| + O(N) oid→path lookup (was O(N²))             | 42 s     | 344 MB   |
+| **+ flush once per chunk boundary**            | **27 s** | 344 MB   |
 
 **Beats SPEC target** (`< 30 s` on the small tier).
 
 Wins landed:
+
 - Every write-heavy table (`commits`, `commit_parents`,
   `commit_trailers`, `hunks`, `file_churn`, `file_stats`, `funcs`,
   `line_births`) uses `Connection::appender(...)`. Dropped ON CONFLICT
@@ -292,17 +293,17 @@ Wins landed:
 
 Same benchmark repo, warm cache:
 
-| query          | before  | after  | SPEC target |
-|----------------|---------|--------|-------------|
-| cohort         | 2400 ms | 530 ms | 500 ms      |
-| survival       | 250 ms  | 120 ms | 500 ms      |
-| burndown lang  | 30 ms   |  20 ms | 500 ms      |
-| burndown author| 30 ms   |  20 ms | 500 ms      |
-| coupling       | 30 ms   |  20 ms | 500 ms      |
-| churn module   | 25 ms   |  20 ms | 500 ms      |
-| classify       | 110 ms  | 100 ms | 500 ms      |
-| age            | 120 ms  | 110 ms | 500 ms      |
-| hotspot rust   | 25 ms   |  22 ms | 500 ms      |
+| query           | before  | after  | SPEC target |
+| --------------- | ------- | ------ | ----------- |
+| cohort          | 2400 ms | 530 ms | 500 ms      |
+| survival        | 250 ms  | 120 ms | 500 ms      |
+| burndown lang   | 30 ms   | 20 ms  | 500 ms      |
+| burndown author | 30 ms   | 20 ms  | 500 ms      |
+| coupling        | 30 ms   | 20 ms  | 500 ms      |
+| churn module    | 25 ms   | 20 ms  | 500 ms      |
+| classify        | 110 ms  | 100 ms | 500 ms      |
+| age             | 120 ms  | 110 ms | 500 ms      |
+| hotspot rust    | 25 ms   | 22 ms  | 500 ms      |
 
 Cohort was scanning 800k `line_births` rows through a per-bucket range
 join; rewrote to pre-aggregate one row per cohort then cross-join with
@@ -398,6 +399,7 @@ reasoning.
 Kept from prior TASKS for future reference. Not planned; capture, revisit.
 
 ### Perf
+
 - Rayon-parallelize churn walk (per-thread `gix::open()` on same `.git/`).
 - Skip `find_object` when the blob is already in the tree-sitter cache.
 - Incremental Parquet writes (`INSERT INTO ext_table SELECT * FROM
@@ -407,6 +409,7 @@ Kept from prior TASKS for future reference. Not planned; capture, revisit.
   the DuckDB swap.
 
 ### Insights (need Phase 3 or v1.2 blame)
+
 - PR-impact CLI: `--diff main..HEAD --output json`, GitHub Action integration.
 - Bus-factor rollup (needs blame).
 - Contribution heatmap (hour-of-day × day-of-week).
@@ -415,22 +418,26 @@ Kept from prior TASKS for future reference. Not planned; capture, revisit.
 - Config-change correlation with churn spikes.
 
 ### Ergonomics
+
 - `.git-archaeologist.toml` at repo root — team / layer maps distinct
   from user config.
 - `git-arch prune --older-than 30d` — cache cleanup verb.
 - Multi-repo `git-arch export` merge tooling.
 
 ### Distribution
+
 - WASM build; browser demo via `isomorphic-git`.
 - `git-arch serve` unix-socket daemon; editor extensions.
 - Library split: `git-archaeologist-core` crate + CLI binary.
 
 ### Grammars (v1.1 re-add + new)
+
 - Re-add (deleted in Phase 0): Java, Ruby, Bash, HTML, CSS, JSON, YAML,
   TOML, Markdown, Scala, Haskell, Zig.
 - New candidates: PHP, Kotlin, Swift, Elm, Nim, Elixir, Erlang, Clojure,
   R, Julia, Solidity, GraphQL, Dart, OCaml, Lua.
 
 ### Meta
+
 - Property tests (`proptest`) on `apply_view`: Σ Δ == final − initial.
 - Fuzz the tree-sitter classifier with `cargo-fuzz`.

@@ -56,33 +56,33 @@ the indexer separately.
 git-arch [--repo PATH] <SUBCOMMAND>
 ```
 
-| subcommand | what it does |
-|------------|--------------|
-| `index`    | build / update the cache (implicit on any query) |
-| `reindex`  | wipe cache + rebuild from scratch |
-| `export <fmt> <dir>` | dump every table as `parquet`, `csv`, or `json` |
-| `sql "<query>"`      | raw DuckDB query, stdout tsv/table |
-| `burndown` | cumulative LOC series (`--by language|author`) |
-| `cohort`   | cohort-stacked LOC series — how much of era X is still here |
-| `survival` | Kaplan-Meier survival; `--fit exp` → half-life scalar |
-| `coupling` | top-N file pairs by co-occurrence in commits |
-| `classify` | Conventional Commit type shares per bucket |
-| `hotspot`  | top-N funcs by churn per bucket (`--lang <L>` required) |
-| `age`      | file age histogram (`now − first_touched_at`) |
-| `churn`    | churn per module | lang | author (`--by <group>`) |
+| subcommand           | what it does                                                |
+| -------------------- | ----------------------------------------------------------- |
+| `index`              | build / update the cache (implicit on any query)            |
+| `reindex`            | wipe cache + rebuild from scratch                           |
+| `export <fmt> <dir>` | dump every table as `parquet`, `csv`, or `json`             |
+| `sql "<query>"`      | raw DuckDB query, stdout tsv/table                          |
+| `burndown`           | cumulative LOC series (`--by language                       |
+| `cohort`             | cohort-stacked LOC series — how much of era X is still here |
+| `survival`           | Kaplan-Meier survival; `--fit exp` → half-life scalar       |
+| `coupling`           | top-N file pairs by co-occurrence in commits                |
+| `classify`           | Conventional Commit type shares per bucket                  |
+| `hotspot`            | top-N funcs by churn per bucket (`--lang <L>` required)     |
+| `age`                | file age histogram (`now − first_touched_at`)               |
+| `churn`              | churn per module                                            |
 
 ### Common flags
 
-| flag | meaning |
-|------|---------|
-| `--from YYYY-MM-DD` | inclusive lower bound |
-| `--to YYYY-MM-DD`   | inclusive upper bound |
-| `--lang rust,python`| filter by language (comma list) |
-| `--author SUBSTR`   | canonical-name/email substring |
-| `--path PREFIX`     | path prefix filter |
-| `--bucket auto|commit|day|week|month|tag` | override bucketing (index-time) |
-| `--format tsv|csv|json|table` | output shape; default = tsv on pipe, aligned table on TTY |
-| `--by language|author|module` | grouping (subcommand-specific) |
+| flag                 | meaning                         |
+| -------------------- | ------------------------------- |
+| `--from YYYY-MM-DD`  | inclusive lower bound           |
+| `--to YYYY-MM-DD`    | inclusive upper bound           |
+| `--lang rust,python` | filter by language (comma list) |
+| `--author SUBSTR`    | canonical-name/email substring  |
+| `--path PREFIX`      | path prefix filter              |
+| `--bucket auto       | commit                          |
+| `--format tsv        | csv                             |
+| `--by language       | author                          |
 
 Subcommand-specific:
 

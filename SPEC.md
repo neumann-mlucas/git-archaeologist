@@ -10,6 +10,7 @@ Companion tools do the drawing (`youplot`, `duckdb` CLI, `datasette`,
 Marimo, whatever). We produce the numbers.
 
 Answers questions like:
+
 - "How much of the code written in 2020 is still alive today?"
 - "What's the half-life of a line of code in this repo?"
 - "Which files always change together?"
@@ -22,12 +23,13 @@ Answers questions like:
 - **git-of-theseus** — cohort stacks + survival curves. We steal both. Slow
   Python; we replace it with Rust + DuckDB.
 - **hercules** — one-pass DAG, coupling matrix, per-author burndown. We
-  steal the *analyses*; drop the Babelfish/UAST dep (dead) and the Python
+  steal the _analyses_; drop the Babelfish/UAST dep (dead) and the Python
   plotter split (`labours`). Single binary instead.
 
 ## Scope v1
 
 ### In scope
+
 - Single repo, current working directory (or path arg).
 - Read-only on the repository; never mutates `.git` or `.mailmap`.
 - Full commit DAG (not first-parent linearization).
@@ -39,6 +41,7 @@ Answers questions like:
   (§Language stack: Core 9 full + Extended 11 best-effort).
 
 ### Explicitly out of scope (v1)
+
 - **No TUI.** Deleted from the prior spec. Analyzer + pipeable output is
   the entire surface.
 - **No built-in plotting.** Users pipe to `youplot` / `duckdb` / anything.
@@ -61,7 +64,7 @@ metric = new query. No new Rust code per metric.
 1. **Burndown by language** — cumulative LOC per bucket, grouped by lang.
 2. **Burndown by author** — same, grouped by canonical author.
 3. **Cohort burndown** — cumulative surviving LOC per bucket, colored by
-   *birth bucket*. Answers "how much 2020 code is still here?" Requires
+   _birth bucket_. Answers "how much 2020 code is still here?" Requires
    hunk-level attribution.
 4. **Survival curve (Kaplan-Meier)** — % of lines from cohort N still
    alive at age T. Optional exponential fit → half-life scalar per repo
@@ -108,7 +111,7 @@ full-resolution — every non-merge commit.
 Bucket sizes:
 
 | Commit count | Default bucket |
-|--------------|----------------|
+| ------------ | -------------- |
 | < 500        | commit         |
 | 500 – 5,000  | day            |
 | 5k – 50k     | week           |
@@ -195,6 +198,7 @@ best-effort using conventional node names:
   Markdown
 
 Non-negotiables:
+
 - Detection: extension → language. No content sniffing.
 - Files whose extension isn't in the registry fall back to an
   extension-map heuristic (single-line comment prefix + block delimiters
@@ -527,11 +531,11 @@ Not run in default CI. Runs on a dev box or a nightly GitHub Action with
 a beefier runner. Both correctness (looser bounds) and perf (hard
 ceilings).
 
-| Class      | Fixture repo         | Commits | Perf ceiling (index) | Perf ceiling (query) |
-|------------|----------------------|---------|----------------------|----------------------|
-| small      | `ratatui-org/ratatui`| ~5k     | 30 s                 | 500 ms               |
-| mid        | `astral-sh/uv`       | ~15k    | 90 s                 | 500 ms               |
-| mid-large  | `godotengine/godot`  | ~60k    | 10 min               | 2 s                  |
+| Class     | Fixture repo          | Commits | Perf ceiling (index) | Perf ceiling (query) |
+| --------- | --------------------- | ------- | -------------------- | -------------------- |
+| small     | `ratatui-org/ratatui` | ~5k     | 30 s                 | 500 ms               |
+| mid       | `astral-sh/uv`        | ~15k    | 90 s                 | 500 ms               |
+| mid-large | `godotengine/godot`   | ~60k    | 10 min               | 2 s                  |
 
 - Correctness bounds:
   - Small: LOC total within ±1% of `tokei`, commit count exact.
@@ -582,17 +586,17 @@ cut (§Filters). Anything beyond `default_bucket` = `git-arch sql`.
 
 Justify every crate on the fence.
 
-| Crate | Why | Alternative rejected |
-|-------|-----|----------------------|
-| `gix` | pure-Rust git, no subprocess, gives hunks + rename via `blob_diff` | shell out to `git` — slower per-commit |
-| `duckdb` (unbundled) | columnar OLAP + parquet native + window fns; new metric = new query | `sqlite` (row-store, slow on aggregations); polars (no persistence story) |
-| `tree-sitter` + 20 grammars | required for function-level + exact comment split | regex (approximate, no function-level) |
-| `rayon` | per-commit parallelism | manual threading |
-| `clap` | CLI | — |
-| `plotters` | — | **rejected** — no plotting in v1 |
-| `ratatui`, `crossterm` | — | **rejected** — no TUI in v1 |
-| `directories` | XDG paths | — |
-| `time` | timestamps + tz | chrono |
+| Crate                       | Why                                                                 | Alternative rejected                                                      |
+| --------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `gix`                       | pure-Rust git, no subprocess, gives hunks + rename via `blob_diff`  | shell out to `git` — slower per-commit                                    |
+| `duckdb` (unbundled)        | columnar OLAP + parquet native + window fns; new metric = new query | `sqlite` (row-store, slow on aggregations); polars (no persistence story) |
+| `tree-sitter` + 20 grammars | required for function-level + exact comment split                   | regex (approximate, no function-level)                                    |
+| `rayon`                     | per-commit parallelism                                              | manual threading                                                          |
+| `clap`                      | CLI                                                                 | —                                                                         |
+| `plotters`                  | —                                                                   | **rejected** — no plotting in v1                                          |
+| `ratatui`, `crossterm`      | —                                                                   | **rejected** — no TUI in v1                                               |
+| `directories`               | XDG paths                                                           | —                                                                         |
+| `time`                      | timestamps + tz                                                     | chrono                                                                    |
 
 **Removed vs prior spec:** ratatui, crossterm, plotters (never added,
 now formally out). Tree-sitter grammar set later re-expanded to 20

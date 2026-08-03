@@ -34,26 +34,26 @@ If no path given, the script uses `$PWD`. First run indexes; subsequent runs are
 
 The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 
-| File | What it holds |
-|------|---------------|
-| `burndown-lang.tsv` | cumulative LOC per bucket, per language |
-| `burndown-author.tsv` | running net-contribution per author per bucket |
-| `cohort.tsv` | alive lines per (bucket, birth_bucket) — the theseus stack |
-| `survival.tsv` | births / alive / dead / survival ratio per cohort |
-| `survival-fit.tsv` | half-life scalar via exponential fit (or `reason` if <100 deaths) |
-| `coupling.tsv` | top-50 file pairs by co-commit |
-| `classify.tsv` | commits + fix/feat/revert/breaking/untyped per bucket |
-| `hotspot-<lang>.tsv` | top-30 funcs by churn, one file per tree-sitter lang present (rust, python, javascript, typescript, tsx, go, c, cpp, lua, vim-script, java, ruby, bash, php, ocaml, scala, haskell); langs with no data are dropped |
-| `age.tsv` | file age histogram, 7-day bins — columns: `age_days_bucket`, `files`. Bucket into 5 tiers for the report (0-90d / 90d-1yr / 1-2yr / 2-5yr / 5yr+) |
-| `churn-module.tsv` | added/deleted per top-level dir per bucket |
-| `churn-author.tsv` | added/deleted per author per bucket |
-| `_meta.txt` | index metadata (schema version, indexed head sha, commit count) |
-| `_summary.txt` | quick totals: commits, tags, contributors, LOC, languages |
-| `_authors.tsv` | per-author tenure: commits, first/last commit ts, active_days, days_since_last |
-| `_ownership.tsv` | files where one author wrote >80% of the lines (HEAD paths only) |
-| `_birth_death.tsv` | born vs died lines per bucket, sorted by died — auto-detects big deletion events |
-| `_longlived.tsv` | day-1 files still in HEAD, with line counts from the first bucket |
-| `_tag_gaps.tsv` | tag inter-arrival distribution (under_1h / under_1d / under_1w / over_1w) |
+| File                  | What it holds                                                                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `burndown-lang.tsv`   | cumulative LOC per bucket, per language                                                                                                                                                                             |
+| `burndown-author.tsv` | running net-contribution per author per bucket                                                                                                                                                                      |
+| `cohort.tsv`          | alive lines per (bucket, birth_bucket) — the theseus stack                                                                                                                                                          |
+| `survival.tsv`        | births / alive / dead / survival ratio per cohort                                                                                                                                                                   |
+| `survival-fit.tsv`    | half-life scalar via exponential fit (or `reason` if <100 deaths)                                                                                                                                                   |
+| `coupling.tsv`        | top-50 file pairs by co-commit                                                                                                                                                                                      |
+| `classify.tsv`        | commits + fix/feat/revert/breaking/untyped per bucket                                                                                                                                                               |
+| `hotspot-<lang>.tsv`  | top-30 funcs by churn, one file per tree-sitter lang present (rust, python, javascript, typescript, tsx, go, c, cpp, lua, vim-script, java, ruby, bash, php, ocaml, scala, haskell); langs with no data are dropped |
+| `age.tsv`             | file age histogram, 7-day bins — columns: `age_days_bucket`, `files`. Bucket into 5 tiers for the report (0-90d / 90d-1yr / 1-2yr / 2-5yr / 5yr+)                                                                   |
+| `churn-module.tsv`    | added/deleted per top-level dir per bucket                                                                                                                                                                          |
+| `churn-author.tsv`    | added/deleted per author per bucket                                                                                                                                                                                 |
+| `_meta.txt`           | index metadata (schema version, indexed head sha, commit count)                                                                                                                                                     |
+| `_summary.txt`        | quick totals: commits, tags, contributors, LOC, languages                                                                                                                                                           |
+| `_authors.tsv`        | per-author tenure: commits, first/last commit ts, active_days, days_since_last                                                                                                                                      |
+| `_ownership.tsv`      | files where one author wrote >80% of the lines (HEAD paths only)                                                                                                                                                    |
+| `_birth_death.tsv`    | born vs died lines per bucket, sorted by died — auto-detects big deletion events                                                                                                                                    |
+| `_longlived.tsv`      | day-1 files still in HEAD, with line counts from the first bucket                                                                                                                                                   |
+| `_tag_gaps.tsv`       | tag inter-arrival distribution (under_1h / under_1d / under_1w / over_1w)                                                                                                                                           |
 
 Read each with `Read` — TSVs, so first line is headers. For big tables (>200 rows), read the head + tail rather than the whole file.
 
@@ -61,16 +61,18 @@ Read each with `Read` — TSVs, so first line is headers. For big tables (>200 r
 
 Target: `ARCHAEOLOGY.md` at the repo root. Structure below. **Iron rule: every section ends with a "so what" line — one sentence stating the finding a reader should walk away with. If you can't write one, delete the section.**
 
-```markdown
+````markdown
 # {repo name} — code archaeology
 
 _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
 
 ## TL;DR
+
 - 3–5 bullets. Include repo shape one-liner (commits, authors, window, primary lang) as first bullet — no separate "Repo shape" section.
 - Auto-flag any of these when present: bus factor ≤2 (>60% net-line share by #1); cohort year with survival <30% AND ≥500 lines born; hot function with commit in last 30 days; last-90d contributor count ≥2× rolling 12-mo median.
 
 ## Cadence
+
 - Sparkline commits/month from `classify.tsv`. Answers "alive, bursty, or dead" in one glyph row.
 - **Flag dead periods**: any consecutive ≥30-day span with zero commits. Name start/end dates. Don't guess causes (illness, job change, burnout) — just report the gap.
 - **Trailing dormancy**: compute `today - last_commit_ts` from `_summary.txt`. If >90 days, this is the headline — put it in TL;DR too.
@@ -95,10 +97,14 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
       v = buckets[name]
       print(f"{name:<10} {chr(9608)*int(v/m*30):<30} {v}")'
   ```
-  Read the header of `age.tsv` first — column names vary by schema version.
+````
+
+Read the header of `age.tsv` first — column names vary by schema version.
+
 - So-what: name the regime (steady / bursty / declining / dead) with the last-90d rate vs full-history median.
 
 ## Growth
+
 - **Total LOC over time** (sum `burndown-lang.tsv` across languages per bucket). Sparkline. Answers "is the codebase growing, plateauing, or shrinking?" Cite start-LOC, end-LOC, and CAGR across the window.
 - **Net LOC/month** from `_birth_death.tsv` — mean of `net` column, plus recent-90d mean. If recent is <20% of historical, growth has stalled; if >2×, expansion phase.
 - **Contributor-count trajectory** — unique authors per year from `churn-author.tsv` (bot-filtered). Sparkline or short table. Growing/flat/shrinking community is a leading indicator that commit-rate doesn't catch (a stable commit rate carried by fewer people = concentrating risk).
@@ -133,6 +139,7 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
 - So-what: name the regime + one sentence on whether growth is coming from more people or the same people writing more.
 
 ## Cohort survival
+
 - Interpret `cohort.tsv` + `survival.tsv`. Quote half-life from `survival-fit.tsv` **only if** `reason` is `ok` AND the value is less than 10× the repo's total age in days — the exponential fit blows up when a recent giant cohort hasn't had time to decay. Otherwise ignore the number and just describe the yearly table.
 - Yearly-survival bar chart. Call out outliers (fast decay or unusual persistence).
 - **Decay-shape callout from `cohort.tsv`** — pick 2-3 birth-buckets (oldest, one mid-life, most recent stable) and describe the shape of the decay: "steep first year then flat" (initial-scaffolding decay), "linear grind" (steady rewrite pressure), "cliff at bucket X" (a single rewrite killed the cohort). One sentence; don't paste the curve. Use this recipe:
@@ -144,6 +151,7 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
 - So-what: does this repo keep code or churn it?
 
 ## Language mix
+
 - **Skip section entirely** if the repo is single-language AND no language ever rose or fell past another. One line under TL;DR instead.
 - Include full section if `burndown-lang.tsv` shows ≥2 languages AND any pair crossed (one overtook another in LOC) OR any language grew/shrank >2× over the window. A "crossover" is a real story — name it (which lang rose, when, at whose expense). Bar chart of current LOC + one-line trend per lang.
 - Recipe:
@@ -163,6 +171,7 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
   Look for crossover rows; that's your headline.
 
 ## Contributors & bus factor
+
 - `burndown-author.tsv` + `churn-author.tsv`. Net-lines bar chart, top 10. **Peak net-LOC is a proxy** — an author whose code was fully deleted still shows up big. Cross-check with `_ownership.tsv` (files where a single author wrote >80%) for who owns the live code today, not who once wrote code.
 - **Author timelines from `burndown-author.tsv`** — for the top 3-5 contributors by net LOC, describe the shape over time: "linear climb", "peak-then-flat" (built something, moved on), "peak-then-decay" (their code got rewritten by others), "late arrival" (joined recently and rising). Do NOT just quote the final value. This is where you catch founder-scaffolding traps and rising owners the tenure table alone misses. Recipe:
   ```bash
@@ -193,10 +202,12 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
 - So-what: name the bus factor and the person(s) it depends on. If several top authors have high `days_since_last`, connect that to any dormancy flagged in Cadence.
 
 ## Change type mix
+
 - **Skip section entirely** if <30% of commits are typed (Conventional Commits). Replace with one line: "N reverts / M commits in span; prefix convention unused" — done.
 - Include full section only if typing rate justifies it (fix/feat/revert rates, spike windows).
 
 ## Coupling & hotspots
+
 - Top 5–10 pairs from `coupling.tsv`. **For the top cross-module pair (not module↔test), run `git log --oneline -- <fileA> <fileB> | head -5` and cite the resulting commits — or state "no ripple trail" honestly.** No hand-waving "these are coupled."
 - Function-level hotspots from `hotspot-<lang>.tsv` if non-empty, top 5.
 - **Trajectory check is mandatory, not optional.** For each top-3 hotspot function that has ≥2 touches in the file, compute whether it's cooling. Recipe:
@@ -218,22 +229,25 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
       verdict = "cooling" if b < a*0.7 else ("worse" if b > a*1.3 else "flat")
       print(f"{k}\ttouches={len(rows)}\t{verdict}\tfirst_half_avg={a:.0f}\tsecond_half_avg={b:.0f}")'
   ```
-  A single-shot big-churn row usually means a one-time rewrite/delete, not a hotspot — say so. Repeated appearances of the *same* function across buckets = real chronic hotspot.
+  A single-shot big-churn row usually means a one-time rewrite/delete, not a hotspot — say so. Repeated appearances of the _same_ function across buckets = real chronic hotspot.
 - So-what: is architecture clean, or is there a god-file / hidden dependency?
 
 ## Module churn
+
 - `churn-module.tsv` bar chart top 8. Note dead dirs (no recent churn) and migrated ones (added == deleted).
 - So-what: where is engineering effort going, and where has it stopped?
 
 ## Risk flags
+
 - Cross-reference findings: silo (churn + author concentration), instability (recent reverts/fixes spike), architecture debt (unexpected coupling with ripple evidence).
 - Each flag: one line, cite the section it came from.
 
 ## Follow-ups
+
 - **Max 3 items.** Each MUST reference an unresolved finding from a section above by name. No speculative queries.
 - Example: "Contributors section says 9 new committers in 30d — check merge latency to test whether backlog is growing" — ties to a real section.
-```
 
+````
 ## SQL extractions (design notes)
 
 The `sql` subcommand hits the DuckDB index directly. `run.sh` dumps five extra TSVs that the built-in subcommands don't cover; use them per the section instructions above. Key tables in the schema (v2):
@@ -276,7 +290,7 @@ it. Use these three shapes:
 
 ```bash
 python3 -c 'import sys; s="▁▂▃▄▅▆▇█"; xs=[float(l.split()[-1]) for l in sys.stdin if l.strip()]; lo,hi=min(xs),max(xs); r=(hi-lo)or 1; print("".join(s[min(7,int((x-lo)/r*7))] for x in xs))' < data.txt
-```
+````
 
 **Horizontal bars** (ranked list, best for top-N authors, module churn,
 cohort survival by year):
@@ -289,7 +303,8 @@ python3 -c 'import sys; rows=[l.rstrip().split("\t") for l in sys.stdin if l.str
 each cell is a `#` or blank. Only worth including when you have ≥15 bins.
 
 Rules for plots in the report:
-- Wrap in ```` ```text ```` fences so tables stay left-aligned.
+
+- Wrap in `` ```text `` fences so tables stay left-aligned.
 - One plot per section max. Charts are a caption for the number, not the
   headline.
 - Skip when N < 5 data points — bars need range to be readable.
