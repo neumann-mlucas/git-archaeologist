@@ -17,7 +17,6 @@ name = "git-archaeologist"
 path = "src/main.rs"
 
 [dependencies]
-# Git — pure-Rust, hunks + rename via blob_diff.
 gix = { version = "0.66", default-features = false, features = [
     "max-performance-safe",
     "mailmap",
@@ -25,10 +24,8 @@ gix = { version = "0.66", default-features = false, features = [
     "blob-diff",
 ] }
 
-# Tree-sitter — every grammar that tracks the current 0.23/0.24/0.25
-# LanguageFn API. Grammars pinned older than that don't link against
-# tree-sitter 0.26. Additions are cheap at runtime (extension-map
-# lookup) — only compile-time + binary size grows.
+# Grammars pin against tree-sitter 0.23/0.24/0.25 LanguageFn ABI; core 0.26
+# won't link older pins. Check the version before bumping.
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
@@ -51,34 +48,25 @@ tree-sitter-scala = "0.24"
 tree-sitter-haskell = "0.23"
 tree-sitter-md = "0.3"
 
-# Cache — OLAP columnar embedded engine. Unbundled: `cargo dist` runners
-# link libduckdb at build time so end-user prebuilt binaries need nothing
-# installed. `cargo install` fallback requires libduckdb on the host.
+# Unbundled: cargo dist links libduckdb at build time; `cargo install` from
+# source needs libduckdb on host.
 duckdb = "1"
 
-# Concurrency
 rayon = "1"
 
-# Diff — line hunks. Already transitive via gix; making it a direct dep so
-# we can build a custom Sink over blob pairs.
+# Direct dep (also transitive via gix) so we can build a custom Sink over blob pairs.
 imara-diff = "0.1"
 
-# Time
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
-
-# CLI
 clap = { version = "4", features = ["derive"] }
 
-# Config + serde
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 directories = "5"
 
-# Errors
 anyhow = "1"
 thiserror = "1"
 
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -86,13 +74,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 
 [features]
-# Opt-in test tiers per SPEC §Test strategy.
-# `e2e` — Tier 2, clones a small public repo (ratatui) once into
-# $XDG_CACHE_HOME/git-archaeologist-tests/ and runs correctness+perf smoke.
-# Requires network on first run; reuses the clone thereafter.
-e2e = []
-# `bench-large` — Tier 3, mid/mid-large fixtures. Placeholder for now.
-bench-large = []
+# Opt-in test tiers per SPEC §Test strategy. See TASKS Phase 5.
+e2e = []          # Tier 2 — clones ratatui once, runs smoke. Needs network first run.
+bench-large = [] # Tier 3 — placeholder.
 
 [profile.release]
 lto = "thin"
