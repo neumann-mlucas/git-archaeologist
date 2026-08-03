@@ -1,0 +1,14 @@
+{
+  "lineWidth": 78,
+  "markdown": {
+    "textWrap": "maintain"
+  },
+  "excludes": [
+    "target",
+    "Cargo.lock",
+    "Cargo.toml"
+  ],
+  "plugins": [
+    "https://plugins.dprint.dev/markdown-0.17.8.wasm"
+  ]
+}
