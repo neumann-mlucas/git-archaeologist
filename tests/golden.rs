@@ -2,9 +2,10 @@
 //!
 //! Builds a small 3-author / 7-language repo with the full feature matrix
 //! (rename, merge, revert, `Co-authored-by:`, `feat!:`, tag,
-//! `.git-blame-ignore-revs`) and asserts every subcommand runs + row-count
-//! invariants hold. Not byte-exact — DuckDB output formatting drifts across
-//! versions; the intent is regression detection on shape + counts.
+//! `.git-blame-ignore-revs`) and asserts every subcommand runs, row-count
+//! invariants hold, and the exported parquet tables set-equal checked-in
+//! goldens (via DuckDB EXCEPT, so parquet footer metadata + row order
+//! don't matter). Regenerate goldens with `REGEN_GOLDENS=1`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -528,7 +529,7 @@ fn tier1_golden_integration() {
     // --- export parquet round-trip ---
     let out_dir = fx.root.path().join("export");
     fx.arch_stdout(&["export", "parquet", out_dir.to_str().unwrap()]);
-    for table in [
+    const TABLES: &[&str] = &[
         "meta",
         "authors",
         "author_aliases",
@@ -541,13 +542,70 @@ fn tier1_golden_integration() {
         "file_stats",
         "funcs",
         "line_births",
-    ] {
+    ];
+    for table in TABLES {
         let p = out_dir.join(format!("{table}.parquet"));
         assert!(p.exists(), "missing parquet: {}", p.display());
         assert!(
             std::fs::metadata(&p).unwrap().len() > 0,
             "empty: {}",
             p.display()
+        );
+    }
+
+    // --- byte-exact goldens (set-diff via DuckDB EXCEPT) ---
+    // Fixture is fully deterministic: pinned author/committer dates,
+    // pinned names/emails, serial rev-walk => stable SHAs, stable
+    // author ids, stable row content. Compare via symmetric EXCEPT so
+    // row order and parquet footer metadata are ignored.
+    //
+    // Regenerate after intentional schema/output changes:
+    //   REGEN_GOLDENS=1 cargo test --test golden tier1_golden_integration
+    let goldens_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens");
+    if std::env::var("REGEN_GOLDENS").is_ok() {
+        std::fs::create_dir_all(&goldens_dir).unwrap();
+        for table in TABLES {
+            let src = out_dir.join(format!("{table}.parquet"));
+            let dst = goldens_dir.join(format!("{table}.parquet"));
+            std::fs::copy(&src, &dst).unwrap();
+        }
+        eprintln!("regenerated {} goldens at {}", TABLES.len(), goldens_dir.display());
+        return;
+    }
+    assert!(
+        goldens_dir.exists(),
+        "goldens missing — run: REGEN_GOLDENS=1 cargo test --test golden tier1_golden_integration"
+    );
+    for table in TABLES {
+        let new_p = out_dir.join(format!("{table}.parquet"));
+        let gold_p = goldens_dir.join(format!("{table}.parquet"));
+        assert!(
+            gold_p.exists(),
+            "missing golden {} — run: REGEN_GOLDENS=1 cargo test --test golden tier1_golden_integration",
+            gold_p.display()
+        );
+        // ponytail: sql-path EXCEPT diff; upgrade to per-column reporter
+        // if a real regression is hard to localize from row-count alone.
+        let q = format!(
+            "SELECT COUNT(*)::BIGINT AS n FROM (\
+               (SELECT * FROM read_parquet('{g}') EXCEPT SELECT * FROM read_parquet('{n}'))\
+               UNION ALL\
+               (SELECT * FROM read_parquet('{n}') EXCEPT SELECT * FROM read_parquet('{g}'))\
+             )",
+            g = gold_p.display(),
+            n = new_p.display(),
+        );
+        let out = fx.arch_stdout(&["sql", &q, "--format", "tsv"]);
+        let diff: i64 = out
+            .lines()
+            .nth(1)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or_else(|| panic!("could not parse diff count for {table}: {out:?}"));
+        assert_eq!(
+            diff, 0,
+            "{table} drift: {diff} row(s) differ\n  new:    {}\n  golden: {}",
+            new_p.display(),
+            gold_p.display()
         );
     }
 }
