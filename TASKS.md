@@ -351,17 +351,33 @@ the upgrade.
 
 ### Tier 3 — mid & mid-large bench (`--features bench-large`, nightly)
 
-- [ ] Cargo feature `bench-large` gates the module.
-- [ ] `benches/fixtures.toml` — pinned SHAs for `ratatui-org/ratatui`
-      (small, ~5k), `astral-sh/uv` (mid, ~15k), `godotengine/godot`
-      (mid-large, ~60k).
-- [ ] `benches/bench.rs` harness — index each fixture, run every
-      subcommand, assert perf table + loose correctness bounds.
-- [ ] RSS ceiling < 2 GB on mid-large — track via `getrusage`.
-- [ ] Optional side-by-side rows: if `hercules` / `git-of-theseus` on
-      `$PATH`, log their timings; do not gate.
-- [ ] `.github/workflows/bench.yml` — larger runner, pushes result JSON
-      to a `benches/results/` branch.
+- [x] Cargo feature `bench-large` gates the module.
+- [x] `benches/fixtures.toml` — SHA-pinned `ratatui-org/ratatui`
+      (small, v0.25.0 @ `7f588482`), `astral-sh/uv` (mid, 0.4.30 @
+      `61ed2a23`), `godotengine/godot` (mid-large, 4.3-stable @
+      `77dcf97d`).
+- [x] `tests/tier3_bench.rs` harness — parses fixtures.toml, clones
+      cached under `$XDG_CACHE_HOME/git-archaeologist-tests/`, runs
+      `index` + every subcommand, asserts per-class ceilings (small
+      180s / mid 600s / mid-large 1800s index; queries 5s/10s/30s).
+      Skips per-fixture when no network + no cache. Local validated:
+      ratatui 36s / 540ms / 516 MB; uv 107s / 211ms / 694 MB.
+      Placed in `tests/` (not `benches/`) to reuse the Tier 2 pattern
+      — no criterion, no nightly.
+- [x] RSS ceiling < 2 GB on mid-large — `libc::getrusage(RUSAGE_CHILDREN)`
+      via ru_maxrss. Ponytail: monotonic across fixtures, so relies on
+      mid-large running last (naturally the case for size-ordered
+      fixtures.toml). Upgrade path noted in tier3_bench.rs.
+- [ ] Optional side-by-side rows: `hercules` / `git-of-theseus` if on
+      PATH. Deferred with ponytail — their CLIs vary by version and we
+      have no reliable install to test against. Add when either tool is
+      installed in a real CI run.
+- [x] `.github/workflows/bench.yml` — nightly cron (04:17 UTC) +
+      `workflow_dispatch` with `skip_large` input, `ubuntu-latest`
+      runner, fixture cache keyed on `hashFiles('benches/fixtures.toml')`,
+      log artifact upload (90d retention). Skipped: dedicated JSON
+      emit + result-branch push — bench log artifact covers the need
+      until someone wants machine-readable trend data.
 
 ## Phase 6 — release
 

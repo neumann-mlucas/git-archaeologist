@@ -72,6 +72,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Tier 3 bench harness — peak-RSS via getrusage.
+libc = "0.2"
 
 [features]
 # Opt-in test tiers per SPEC §Test strategy. See TASKS Phase 5.

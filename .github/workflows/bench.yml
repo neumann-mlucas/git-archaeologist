@@ -1,0 +1,68 @@
+name: bench
+
+# Nightly Tier 3 harness (SPEC §Test strategy, TASKS Phase 5 Tier 3).
+# Also manually triggerable via workflow_dispatch. Runs against every
+# fixture in benches/fixtures.toml (ratatui, uv, godot) and enforces
+# per-class perf ceilings. Fixture clones are cached across runs,
+# keyed on fixtures.toml so a SHA bump invalidates cleanly.
+
+on:
+  schedule:
+    # 04:17 UTC daily — off the top-of-hour cron spike window.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      skip_large:
+        description: "Skip mid-large fixtures (godot)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: tier3 bench harness
+    runs-on: ubuntu-latest
+    # Godot fixture (60k commits + ~1 GB clone) can push wall time past
+    # the default 6h limit on cold cache. Give it headroom.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache fixture clones
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/git-archaeologist-tests
+          key: tier3-fixtures-${{ hashFiles('benches/fixtures.toml') }}
+          restore-keys: |
+            tier3-fixtures-
+
+      - name: Build (release)
+        run: cargo build --release --tests --features "bundled-duckdb bench-large"
+
+      - name: Run tier3 bench
+        env:
+          TIER3_SKIP_LARGE: ${{ inputs.skip_large && '1' || '' }}
+        # --nocapture lets the per-fixture Report::print() lines land in
+        # the workflow log (harness output goes to stderr).
+        run: |
+          cargo test --release --features "bundled-duckdb bench-large" \
+            --test tier3_bench tier3_bench_all_fixtures -- --nocapture \
+            2>&1 | tee benches/results.log
+
+      - name: Upload bench log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier3-bench-${{ github.run_id }}
+          path: benches/results.log
+          retention-days: 90

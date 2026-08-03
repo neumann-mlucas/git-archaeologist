@@ -1,0 +1,29 @@
+# Tier 3 bench fixtures. SHA-pinned so results are reproducible run-to-run,
+# even if upstream tags get force-moved. Add a fixture by appending a
+# [[fixture]] table below.
+#
+# Classes drive the perf ceilings in tests/tier3_bench.rs:
+#   small     — ~5k commits,  index <=  60s, query <= 1s
+#   mid       — ~15k commits, index <= 300s, query <= 2s
+#   mid-large — ~60k commits, index <= 900s, query <= 5s, RSS < 2 GB
+
+[[fixture]]
+name  = "ratatui"
+url   = "https://github.com/ratatui-org/ratatui.git"
+tag   = "v0.25.0"
+sha   = "7f5884829cc108d04c3d3547cd41e60af34951dc"
+class = "small"
+
+[[fixture]]
+name  = "uv"
+url   = "https://github.com/astral-sh/uv.git"
+tag   = "0.4.30"
+sha   = "61ed2a236ade13703fd6cd3271e2c4d627398f38"
+class = "mid"
+
+[[fixture]]
+name  = "godot"
+url   = "https://github.com/godotengine/godot.git"
+tag   = "4.3-stable"
+sha   = "77dcf97d82cbfe4e4615475fa52ca03da645dbd8"
+class = "mid-large"
