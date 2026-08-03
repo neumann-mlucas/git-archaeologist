@@ -338,10 +338,6 @@ the upgrade.
   fold. Upgrade path: read `memory_limit` from `config.toml` (add to
   the shrunk-in-Phase-1 config), fallback 12 GB. Trigger: a real user
   reports the ceiling, or Tier 3 harness on godot exceeds it.
-- **`tests/tier2_smoke.rs:10` — tier-2 fixture pinned by tag not SHA.**
-  Ceiling: ratatui-org can retag or force-push `v0.25.0` and silently
-  flip the fixture. Upgrade path: fold into `benches/fixtures.toml`
-  SHA pin when Tier 3 lands (§Phase 5 Tier 3). One source of truth.
 - **`skills/git-arch-analyze/run.sh:8` — skill has no flags beyond
   repo path.** Ceiling: caller can't override `/tmp` out-dir, skip
   the index step on a warm cache, or narrow to a subset of

@@ -16,105 +16,14 @@
 
 #![cfg(feature = "bench-large")]
 
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+mod common;
+
+use common::Fixture;
+use std::path::Path;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_git-archaeologist");
-const CACHE_DIR_NAME: &str = "git-archaeologist-tests";
-
-#[derive(Deserialize)]
-struct Fixtures {
-    fixture: Vec<Fixture>,
-}
-
-#[derive(Deserialize, Clone)]
-struct Fixture {
-    name: String,
-    url: String,
-    #[allow(dead_code)]
-    tag: String,
-    sha: String,
-    class: String, // "small" | "mid" | "mid-large"
-}
-
-fn load_fixtures() -> Fixtures {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/fixtures.toml");
-    let text = std::fs::read_to_string(&path).expect("read benches/fixtures.toml");
-    toml::from_str(&text).expect("parse benches/fixtures.toml")
-}
-
-fn cache_root() -> PathBuf {
-    if let Ok(p) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(p).join(CACHE_DIR_NAME);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".cache").join(CACHE_DIR_NAME);
-    }
-    std::env::temp_dir().join(CACHE_DIR_NAME)
-}
-
-fn have_git() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn have_network(url: &str) -> bool {
-    Command::new("git")
-        .args(["ls-remote", "--heads", url, "HEAD"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Clone fixture if missing, then check out the pinned SHA on a real branch
-/// (git-archaeologist rejects detached HEAD per SPEC §Scope).
-fn ensure_fixture(fx: &Fixture) -> Option<PathBuf> {
-    let root = cache_root();
-    std::fs::create_dir_all(&root).ok()?;
-    let repo = root.join(&fx.name);
-
-    if !repo.join(".git").exists() {
-        eprintln!("cloning {} into {} …", fx.url, repo.display());
-        let status = Command::new("git")
-            .args(["clone", &fx.url, repo.to_str()?])
-            .status()
-            .ok()?;
-        if !status.success() {
-            return None;
-        }
-    }
-
-    // Ensure the SHA is fetched — cached clones may pre-date the pin.
-    let _ = Command::new("git")
-        .args(["fetch", "--quiet", "origin", &fx.sha])
-        .current_dir(&repo)
-        .status();
-
-    let branch = format!("pin-{}", &fx.sha[..12]);
-    let out = Command::new("git")
-        .args(["checkout", "--quiet", "-B", &branch, &fx.sha])
-        .current_dir(&repo)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        eprintln!(
-            "checkout {}: {}",
-            fx.sha,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return None;
-    }
-    Some(repo)
-}
 
 /// Peak RSS of all exited children so far, in KB.
 /// Linux: `ru_maxrss` is KB already. macOS: bytes → divide by 1024.
@@ -199,7 +108,7 @@ fn perf_ceiling_query(class: &str) -> Duration {
 }
 
 fn run_one(fx: &Fixture) -> Option<Report> {
-    let repo = ensure_fixture(fx)?;
+    let repo = common::ensure_fixture(fx)?;
     let xdg_data = tempfile::TempDir::new().unwrap();
     let xdg_config = tempfile::TempDir::new().unwrap();
 
@@ -257,22 +166,22 @@ fn run_one(fx: &Fixture) -> Option<Report> {
 
 #[test]
 fn tier3_bench_all_fixtures() {
-    if !have_git() {
+    if !common::have_git() {
         eprintln!("skip: git not on PATH");
         return;
     }
 
-    let fixtures = load_fixtures();
+    let fixtures = common::load_fixtures();
     let skip_large = std::env::var("TIER3_SKIP_LARGE").is_ok();
     let mut reports = Vec::new();
 
-    for fx in &fixtures.fixture {
+    for fx in &fixtures {
         if fx.class == "mid-large" && skip_large {
             eprintln!("skip: {} (TIER3_SKIP_LARGE set)", fx.name);
             continue;
         }
-        let cached = cache_root().join(&fx.name).join(".git").exists();
-        if !cached && !have_network(&fx.url) {
+        let cached = common::cache_root().join(&fx.name).join(".git").exists();
+        if !cached && !common::have_network(&fx.url) {
             eprintln!("skip: {} (no network, no cached clone)", fx.name);
             continue;
         }
@@ -316,6 +225,6 @@ fn tier3_bench_all_fixtures() {
     assert!(
         !reports.is_empty(),
         "no fixtures ran — check network + cache under {}",
-        cache_root().display()
+        common::cache_root().display()
     );
 }
