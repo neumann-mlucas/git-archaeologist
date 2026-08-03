@@ -45,7 +45,8 @@ The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 | `classify.tsv`        | commits + fix/feat/revert/breaking/untyped per bucket                                                                                                                                                               |
 | `hotspot-<lang>.tsv`  | top-30 funcs by churn, one file per tree-sitter lang present (rust, python, javascript, typescript, tsx, go, c, cpp, lua, vim-script, java, ruby, bash, php, ocaml, scala, haskell); langs with no data are dropped |
 | `age.tsv`             | file age histogram, 7-day bins — columns: `age_days_bucket`, `files`. Bucket into 5 tiers for the report (0-90d / 90d-1yr / 1-2yr / 2-5yr / 5yr+)                                                                   |
-| `churn-module.tsv`    | added/deleted per top-level dir per bucket                                                                                                                                                                          |
+| `churn-module.tsv`    | added/deleted per top-level dir per bucket (`churn --by module --depth 1`)                                                                                                                                          |
+| `churn-module-d2.tsv` | same at second-level path granularity (`churn --by module --depth 2`) — reach for this when `src`, `runtime`, `test` are the top rows and hide where the churn actually lives                                       |
 | `churn-author.tsv`    | added/deleted per author per bucket                                                                                                                                                                                 |
 | `_meta.txt`           | index metadata (schema version, indexed head sha, commit count)                                                                                                                                                     |
 | `_summary.txt`        | quick totals: commits, tags, contributors, LOC, languages                                                                                                                                                           |
@@ -234,7 +235,9 @@ Read the header of `age.tsv` first — column names vary by schema version.
 
 ## Module churn
 
-- `churn-module.tsv` bar chart top 8. Note dead dirs (no recent churn) and migrated ones (added == deleted).
+- `churn-module.tsv` for the coarse regime: bar chart top 8 top-level dirs. Note dead dirs (no recent churn) and migrated ones (added ≈ deleted).
+- **When top-level dirs are too broad to be informative** (e.g. neovim: `src`, `runtime`, `test` each dominate but say nothing), switch to `churn-module-d2.tsv`. Second-level paths (`src/nvim`, `test/functional`, `runtime/lua`) show which subsystem is actually moving. Include a milestone-year table for the top-4 depth-2 modules (net = added − deleted per year, plus lifetime churn = added + deleted). If d2 rows still look thin, run `git-archaeologist churn --by module --depth 3` ad-hoc.
+- Balance check: for each top-4 module, if `|net| < 5% of churn` call it "balanced — ongoing maintenance, not growth or removal". If `net ≈ +churn` it's greenfield; if `net ≈ -churn` it's a removal wave.
 - So-what: where is engineering effort going, and where has it stopped?
 
 ## Risk flags

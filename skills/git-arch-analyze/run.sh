@@ -72,6 +72,7 @@ run coupling         coupling --top 50
 run classify         classify
 run age              age
 run churn-module     churn --by module
+run churn-module-d2  churn --by module --depth 2
 run churn-author     churn --by author
 
 # hotspot needs --lang; run for each tree-sitter lang with a fn grammar
