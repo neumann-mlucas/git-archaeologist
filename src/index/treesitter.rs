@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use rayon::prelude::*;
 use tree_sitter::{Language, Node, Parser, Tree};
 
@@ -30,11 +29,6 @@ pub struct FuncDef {
 pub struct FileSnapshot {
     pub stat: FileStat,
     pub funcs: Vec<FuncDef>,
-}
-
-#[derive(Default)]
-pub struct BlobCache {
-    entries: HashMap<gix::ObjectId, Option<CachedParse>>,
 }
 
 #[derive(Clone)]
@@ -372,15 +366,6 @@ impl Default for LangRegistry {
     }
 }
 
-pub fn snapshot(
-    repo: &Repo,
-    sha: &str,
-    cache: &mut BlobCache,
-    registry: &mut LangRegistry,
-) -> Result<Vec<FileSnapshot>> {
-    snapshot_with(&repo.git, sha, cache, registry)
-}
-
 /// Two-phase parallel treesitter for a set of sampled commits:
 ///
 ///   1. Serial tree walk per sha collects `(path, oid)` pairs and the
@@ -504,76 +489,6 @@ fn enumerate_tree(
         out.push((path_str, entry.oid));
     }
     Some(out)
-}
-
-/// Same as [`snapshot`], but takes a raw `gix::Repository` so a rayon
-/// worker with its own per-thread `gix::open(...)` handle can call it.
-pub fn snapshot_with(
-    git: &gix::Repository,
-    sha: &str,
-    cache: &mut BlobCache,
-    registry: &mut LangRegistry,
-) -> Result<Vec<FileSnapshot>> {
-    let oid: gix::ObjectId = sha.parse().context("parsing commit sha")?;
-    let commit = git
-        .find_object(oid)
-        .context("finding commit object")?
-        .try_into_commit()
-        .context("expected commit object")?;
-
-    let tree = commit.tree().context("resolving commit tree")?;
-    let entries = tree
-        .traverse()
-        .breadthfirst
-        .files()
-        .context("walking tree entries")?;
-
-    let mut out = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        if !entry.mode.is_blob() {
-            continue;
-        }
-        let path_str = entry.filepath.to_string();
-
-        let has_spec = registry.spec_for(&path_str).is_some();
-        if !has_spec {
-            continue;
-        }
-
-        let cached = match cache.entries.get(&entry.oid) {
-            Some(v) => v.clone(),
-            None => {
-                let parsed = parse_blob(git, entry.oid, &path_str, registry);
-                cache.entries.insert(entry.oid, parsed.clone());
-                parsed
-            }
-        };
-
-        if let Some(c) = cached {
-            // Path-based test fallback: if the file lives in a test dir /
-            // uses a test-name suffix, mark every func as 'test'. Overrides
-            // the per-lang detector.
-            let mut funcs = c.funcs;
-            if is_test_path(&path_str) {
-                for f in funcs.iter_mut() {
-                    f.kind = "test".to_string();
-                }
-            }
-            out.push(FileSnapshot {
-                stat: FileStat {
-                    path: path_str,
-                    language: c.language,
-                    code: c.code,
-                    comments: c.comments,
-                    blanks: c.blanks,
-                },
-                funcs,
-            });
-        }
-    }
-
-    Ok(out)
 }
 
 fn parse_blob(

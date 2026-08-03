@@ -313,7 +313,6 @@ fn run_index(
             force_full,
             bucket_override: bucket,
         },
-        None,
     )
 }
 
@@ -336,7 +335,6 @@ fn ensure_indexed(
                 force_full,
                 bucket_override: bucket,
             },
-            None,
         )?;
     }
     Ok(())

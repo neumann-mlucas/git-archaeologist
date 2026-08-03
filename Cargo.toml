@@ -58,7 +58,6 @@ duckdb = "1"
 
 # Concurrency
 rayon = "1"
-crossbeam-channel = "0.5"
 
 # Diff — line hunks. Already transitive via gix; making it a direct dep so
 # we can build a custom Sink over blob pairs.

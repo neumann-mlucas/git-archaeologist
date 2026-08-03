@@ -32,13 +32,11 @@ use crate::cache::Cache;
 #[derive(Clone)]
 struct HunkRow {
     sha: String,
-    authored_at: i64,
     bucket_key: i64,
     path: String,
     prev_path: Option<String>,
     old_start: i32,
     old_len: i32,
-    new_start: i32,
     new_len: i32,
 }
 
@@ -95,9 +93,9 @@ pub fn fold_and_materialize(cache: &mut Cache) -> Result<()> {
 
 fn load_hunks(cache: &Cache) -> Result<Vec<HunkRow>> {
     let mut stmt = cache.conn.prepare(
-        "SELECT h.sha, c.authored_at, c.bucket_key,
+        "SELECT h.sha, c.bucket_key,
                 h.path, h.prev_path,
-                h.old_start, h.old_len, h.new_start, h.new_len
+                h.old_start, h.old_len, h.new_len
          FROM   hunks h
          JOIN   commits c ON c.sha = h.sha
          WHERE  c.is_merge = FALSE
@@ -106,14 +104,12 @@ fn load_hunks(cache: &Cache) -> Result<Vec<HunkRow>> {
     let iter = stmt.query_map([], |r| {
         Ok(HunkRow {
             sha: r.get(0)?,
-            authored_at: r.get(1)?,
-            bucket_key: r.get(2)?,
-            path: r.get(3)?,
-            prev_path: r.get::<_, Option<String>>(4)?,
-            old_start: r.get(5)?,
-            old_len: r.get(6)?,
-            new_start: r.get(7)?,
-            new_len: r.get(8)?,
+            bucket_key: r.get(1)?,
+            path: r.get(2)?,
+            prev_path: r.get::<_, Option<String>>(3)?,
+            old_start: r.get(4)?,
+            old_len: r.get(5)?,
+            new_len: r.get(6)?,
         })
     })?;
     Ok(iter.collect::<duckdb::Result<Vec<_>>>()?)
@@ -208,16 +204,14 @@ fn apply_commit(
 mod tests {
     use super::*;
 
-    fn mk(sha: &str, bucket: i64, path: &str, os: i32, ol: i32, ns: i32, nl: i32) -> HunkRow {
+    fn mk(sha: &str, bucket: i64, path: &str, os: i32, ol: i32, _ns: i32, nl: i32) -> HunkRow {
         HunkRow {
             sha: sha.to_string(),
-            authored_at: bucket,
             bucket_key: bucket,
             path: path.to_string(),
             prev_path: None,
             old_start: os,
             old_len: ol,
-            new_start: ns,
             new_len: nl,
         }
     }

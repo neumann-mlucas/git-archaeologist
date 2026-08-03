@@ -48,18 +48,16 @@ fn is_stale(path: &Path) -> bool {
     }
 }
 
-/// Cap DuckDB memory + parallelism so indexing large repos doesn't OOM
-/// the host, and give it an explicit spill directory so it can pin blocks
-/// past the memory limit.
+/// Cap DuckDB memory so large-repo indexing can't OOM the host, and
+/// disable insertion-order preservation (Appender path doesn't need it).
+/// Threads default to core count — nothing to set.
 ///
-/// ponytail: memory_limit hard-coded at 8GB, temp_directory under the
-/// cache file. If a real user hits either ceiling, promote to config
-/// keys — until then, YAGNI.
+/// ponytail: memory_limit hard-coded at 12GB. Promote to config if a
+/// real user hits the ceiling.
 fn tune(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "SET preserve_insertion_order = false;
-         SET memory_limit = '12GB';
-         SET threads = 4;",
+         SET memory_limit = '12GB';",
     )?;
     Ok(())
 }

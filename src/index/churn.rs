@@ -46,47 +46,10 @@ pub struct CommitDiff {
 
 const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
-/// Walk every non-merge commit reachable from HEAD; return per-commit
-/// diff (hunks + churn) keyed by commit sha.
-///
-/// Diff computation is embarrassingly parallel (SPEC §Indexing pipeline,
-/// Phase 1). Each rayon worker opens its own `gix::Repository` handle
-/// via `map_init` — gix::Repository is `!Sync` but re-opening the same
-/// `.git/` from N threads is safe.
-pub fn batch_all(repo: &Repo) -> Result<HashMap<String, CommitDiff>> {
-    let jobs = collect_jobs(repo)?;
-    Ok(process_jobs(repo, &jobs))
-}
-
-/// Same as [`batch_all`] but restricted to a caller-supplied set of
-/// commit shas. Used by the chunked indexer path to bound peak RSS —
-/// callers slice `all_commits` into fixed-size windows and only
-/// materialize one window's diffs at a time.
-///
-/// Merge commits (parents.len() > 1) are silently dropped, matching
-/// `batch_all`. If a sha isn't findable, it's silently dropped.
-pub fn batch_shas(
-    repo: &Repo,
-    shas: &[String],
-) -> HashMap<String, CommitDiff> {
-    let mut jobs: Vec<(String, Option<gix::ObjectId>)> = Vec::with_capacity(shas.len());
-    for sha in shas {
-        let Some(oid) = sha.parse::<gix::ObjectId>().ok() else {
-            continue;
-        };
-        let Ok(commit) = repo.git.find_commit(oid) else {
-            continue;
-        };
-        let parents: Vec<_> = commit.parent_ids().collect();
-        if parents.len() > 1 {
-            continue;
-        }
-        jobs.push((sha.clone(), parents.first().map(|p| p.detach())));
-    }
-    process_jobs(repo, &jobs)
-}
-
-fn collect_jobs(
+/// Walk every non-merge commit reachable from HEAD; return the
+/// `(sha, first-parent-oid)` job list the chunked indexer slices into
+/// windows. Merge commits are silently dropped.
+pub fn collect_all_jobs(
     repo: &Repo,
 ) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
     let head_id = repo.git.head_id().context("resolving HEAD id")?;
@@ -113,6 +76,9 @@ fn collect_jobs(
     Ok(jobs)
 }
 
+/// Run the diff over a slice of jobs. Each rayon worker opens its own
+/// `gix::Repository` via `map_init` — gix::Repository is `!Sync` but
+/// re-opening the same `.git/` from N threads is safe.
 pub fn process_jobs(
     repo: &Repo,
     jobs: &[(String, Option<gix::ObjectId>)],
@@ -129,15 +95,6 @@ pub fn process_jobs(
         )
         .collect();
     results.into_iter().collect()
-}
-
-/// Public accessor for the (sha, parent_id) job list — used by the
-/// chunked indexer path so it can call `process_jobs` on slices instead
-/// of paying the per-sha `find_commit` overhead of [`batch_shas`].
-pub fn collect_all_jobs(
-    repo: &Repo,
-) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
-    collect_jobs(repo)
 }
 
 /// Compute the (hunks, churn) delta for a single commit against its

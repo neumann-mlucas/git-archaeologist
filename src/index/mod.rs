@@ -9,7 +9,6 @@ pub mod walker;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use crossbeam_channel::Sender;
 use duckdb::params;
 
 use crate::cache::{queries, Cache};
@@ -17,13 +16,6 @@ use crate::index::bucket::BucketSize;
 use crate::index::mailmap::AuthorResolver;
 use crate::index::walker::CommitInfo;
 use crate::repo::Repo;
-
-#[derive(Debug, Clone)]
-pub enum Progress {
-    Started { total_commits: usize, sampled: usize },
-    Commit { done: usize, total: usize },
-    Finished,
-}
 
 pub struct IndexOptions {
     pub force_full: bool,
@@ -34,7 +26,6 @@ pub fn run(
     repo: &Repo,
     cache: &mut Cache,
     opts: IndexOptions,
-    progress: Option<Sender<Progress>>,
 ) -> Result<()> {
     let ignore_revs = parse::load_ignore_revs(&repo.root);
 
@@ -77,15 +68,8 @@ pub fn run(
 
     let total = all_commits.len();
     let sampled_count = assignments.iter().filter(|a| a.is_sampled).count();
-    if let Some(tx) = &progress {
-        let _ = tx.send(Progress::Started {
-            total_commits: total,
-            sampled: sampled_count,
-        });
-    }
-    // Direct stderr line every 100ms + at start/end. Independent of the
-    // channel — CLI mode has no channel consumer, and this is the only
-    // visible signal that `git-arch index` is doing something.
+    // Direct stderr line every 100ms + at start/end — only visible signal
+    // that `git-arch index` is doing work.
     eprintln!("indexing {total} commits ({sampled_count} sampled)…");
     let start_at = std::time::Instant::now();
 
@@ -108,16 +92,10 @@ pub fn run(
         .map(|j| (j.0.clone(), j.clone()))
         .collect();
 
-    // Flush cadence: how many commits between BEGIN/COMMIT chunk
-    // boundaries + Appender flushes. Trade-off:
-    // - large chunks minimize per-commit sync cost (auto-commit = disk
-    //   round-trip per row), but hold every row in RAM until commit.
-    // - small chunks bound RAM but pay more sync cost.
-    // Appender-flush cadence. Each flush syncs 7 tables to disk (7
-    // 30-ms round-trips). Set to INDEX_CHUNK so we flush once per
-    // chunk boundary instead of mid-chunk. Peak Appender buffer =
-    // one chunk's worth, which we already tolerate.
-    const FLUSH_EVERY: usize = 1000;
+    // Appender flush happens once per chunk boundary (below), not per
+    // commit. Each flush syncs 7 tables to disk; batching them at the
+    // chunk edge amortizes the round-trips against INDEX_CHUNK rows.
+    // Peak Appender buffer = one chunk's worth, already the RSS bound.
 
     let mut last_progress_at = std::time::Instant::now();
     let progress_interval = std::time::Duration::from_millis(100);
@@ -170,8 +148,6 @@ pub fn run(
         .appender("file_stats")
         .context("file_stats appender")?;
     let mut funcs_app = cache.conn.appender("funcs").context("funcs appender")?;
-
-    let mut since_flush: usize = 0;
 
     // Outer chunk: pre-compute churn + treesitter snapshots for a
     // window of commits, then run the insert loop over that window,
@@ -291,18 +267,6 @@ pub fn run(
                 }
             }
 
-            since_flush += 1;
-            if since_flush >= FLUSH_EVERY {
-                commits_app.flush()?;
-                parents_app.flush()?;
-                trailers_app.flush()?;
-                hunks_app.flush()?;
-                churn_app.flush()?;
-                file_stats_app.flush()?;
-                funcs_app.flush()?;
-                since_flush = 0;
-            }
-
             let done = *i + 1;
             let now = std::time::Instant::now();
             if done == total || now.duration_since(last_progress_at) >= progress_interval {
@@ -318,11 +282,16 @@ pub fn run(
                     (done as f64 / total as f64) * 100.0
                 );
                 last_progress_at = now;
-                if let Some(sender) = &progress {
-                    let _ = sender.send(Progress::Commit { done, total });
-                }
             }
         }
+        // Chunk-boundary flush — one sync per chunk instead of per commit.
+        commits_app.flush()?;
+        parents_app.flush()?;
+        trailers_app.flush()?;
+        hunks_app.flush()?;
+        churn_app.flush()?;
+        file_stats_app.flush()?;
+        funcs_app.flush()?;
         // churn_map + snapshot_map drop here → peak RSS resets between
         // windows.
     }
@@ -398,10 +367,6 @@ pub fn run(
         "CREATE INDEX IF NOT EXISTS idx_line_births_bucket ON line_births(birth_bucket);
          CREATE INDEX IF NOT EXISTS idx_line_births_path   ON line_births(path);",
     )?;
-
-    if let Some(sender) = &progress {
-        let _ = sender.send(Progress::Finished);
-    }
 
     Ok(())
 }
@@ -530,7 +495,6 @@ mod tests {
                 force_full: true,
                 bucket_override: Some(BucketSize::Commit),
             },
-            None,
         )
         .expect("index run");
 
