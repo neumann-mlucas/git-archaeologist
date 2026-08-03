@@ -37,14 +37,21 @@ system. Install it first:
 - Debian/Ubuntu: `apt install libduckdb-dev`
 - macOS: `brew install duckdb`
 
+The binary installs as `git-archaeologist`. If you want the shorter
+`git-arch`, add an alias:
+
+```sh
+alias git-arch=git-archaeologist
+```
+
 ## Quick start
 
 ```sh
 cd my-repo
-git-arch index                # build the cache
-git-arch burndown --by language | uplot line --xlabel date --ylabel loc
-git-arch survival --fit exp   # scalar half-life
-git-arch coupling --top 20 | uplot barplot --title 'file coupling'
+git-archaeologist index                # build the cache
+git-archaeologist burndown --by language | uplot line --xlabel date --ylabel loc
+git-archaeologist survival --fit exp   # scalar half-life
+git-archaeologist coupling --top 20 | uplot barplot --title 'file coupling'
 ```
 
 `index` runs implicitly on first query — the explicit form just lets you time
@@ -53,36 +60,32 @@ the indexer separately.
 ## Subcommands
 
 ```
-git-arch [--repo PATH] <SUBCOMMAND>
+git-archaeologist [--repo PATH] <SUBCOMMAND>
 ```
 
-| subcommand           | what it does                                                |
-| -------------------- | ----------------------------------------------------------- |
-| `index`              | build / update the cache (implicit on any query)            |
-| `reindex`            | wipe cache + rebuild from scratch                           |
-| `export <fmt> <dir>` | dump every table as `parquet`, `csv`, or `json`             |
-| `sql "<query>"`      | raw DuckDB query, stdout tsv/table                          |
-| `burndown`           | cumulative LOC series (`--by language                       |
-| `cohort`             | cohort-stacked LOC series — how much of era X is still here |
-| `survival`           | Kaplan-Meier survival; `--fit exp` → half-life scalar       |
-| `coupling`           | top-N file pairs by co-occurrence in commits                |
-| `classify`           | Conventional Commit type shares per bucket                  |
-| `hotspot`            | top-N funcs by churn per bucket (`--lang <L>` required)     |
-| `age`                | file age histogram (`now − first_touched_at`)               |
-| `churn`              | churn per module                                            |
+- **`index`** — build / update the cache (implicit on any query).
+- **`reindex`** — wipe cache + rebuild from scratch.
+- **`export <fmt> <dir>`** — dump every table as `parquet`, `csv`, or `json`.
+- **`sql "<query>"`** — raw DuckDB query, stdout tsv/table.
+- **`burndown`** — cumulative LOC series. `--by language|author|module`.
+- **`cohort`** — cohort-stacked LOC series — how much of era X is still here.
+- **`survival`** — Kaplan-Meier survival; `--fit exp` returns a half-life scalar.
+- **`coupling`** — top-N file pairs by co-occurrence in commits.
+- **`classify`** — Conventional Commit type shares per bucket.
+- **`hotspot`** — top-N funcs by churn per bucket. `--lang <L>` required.
+- **`age`** — file age histogram (`now − first_touched_at`).
+- **`churn`** — churn per module.
 
 ### Common flags
 
-| flag                 | meaning                         |
-| -------------------- | ------------------------------- |
-| `--from YYYY-MM-DD`  | inclusive lower bound           |
-| `--to YYYY-MM-DD`    | inclusive upper bound           |
-| `--lang rust,python` | filter by language (comma list) |
-| `--author SUBSTR`    | canonical-name/email substring  |
-| `--path PREFIX`      | path prefix filter              |
-| `--bucket auto       | commit                          |
-| `--format tsv        | csv                             |
-| `--by language       | author                          |
+- `--from YYYY-MM-DD` — inclusive lower bound.
+- `--to YYYY-MM-DD` — inclusive upper bound.
+- `--lang rust,python` — filter by language (comma list).
+- `--author SUBSTR` — canonical-name/email substring.
+- `--path PREFIX` — path prefix filter.
+- `--bucket auto|day|week|month|tag|commit` — time bucketing.
+- `--format tsv|csv|json|table` — default: tsv on pipe, table on TTY.
+- `--by language|author|module` — group axis for `burndown` / `churn`.
 
 Subcommand-specific:
 
@@ -92,33 +95,39 @@ Subcommand-specific:
 
 ## Recipes
 
-### `youplot` / `uplot`
+### youplot
 
 ```sh
 # stacked LOC per language
-git-arch burndown --by language | uplot line --xlabel date --ylabel loc
+git-archaeologist burndown --by language | uplot line --xlabel date --ylabel loc
 
 # per-author net contribution
-git-arch burndown --by author   | uplot line --xlabel date
+git-archaeologist burndown --by author   | uplot line --xlabel date
 
 # top-20 coupled file pairs
-git-arch coupling --top 20      | uplot barplot --title 'file coupling'
+git-archaeologist coupling --top 20      | uplot barplot --title 'file coupling'
 
 # half-life scalar, no plot
-git-arch survival --fit exp
+git-archaeologist survival --fit exp
 ```
 
 ### DuckDB CLI
 
+Dump the tables and query them directly:
+
 ```sh
-git-arch export parquet /tmp/repo/
-duckdb -c "SELECT lang, SUM(code) FROM read_parquet('/tmp/repo/file_stats.parquet') GROUP BY 1"
+git-archaeologist export parquet /tmp/repo/
+duckdb -c "SELECT * FROM read_parquet('/tmp/repo/commits.parquet') LIMIT 5"
 ```
+
+For a correct current-snapshot query (join through `commits.bucket_key` to
+avoid summing across every sampled snapshot), prefer the built-in `sql`
+subcommand — it runs against the live cache without export.
 
 ### Raw SQL escape hatch
 
 ```sh
-git-arch sql "SELECT language, SUM(code)
+git-archaeologist sql "SELECT language, SUM(code)
               FROM   file_stats
               WHERE  bucket_key >= 20240101
               GROUP  BY language
@@ -189,19 +198,18 @@ Line-level metrics (burndown, churn, coupling, age, cohort, survival) work
 for any file the diff engine sees. Function-level metrics (hotspot,
 function-cohort, test-vs-code split) rely on tree-sitter and only cover
 langs with `fn_kinds` set (all Core 9 + Java, Ruby, Bash, PHP, OCaml,
-Scala, Haskell). Post-v1 grammars land as pure adds — one Cargo line +
-one `LangSpec` entry each.
+Scala, Haskell).
 
 ## Stack
 
 - [`gix`](https://github.com/GitoxideLabs/gitoxide) — pure-Rust git, hunks + rename detection via `blob_diff`
 - [`duckdb`](https://duckdb.org) — columnar OLAP cache, native parquet
 - [`tree-sitter`](https://tree-sitter.github.io) — per-language LOC + function extraction
-- [`imara-diff`](https://github.com/pascalkuthe/imara-diff) — hunk sink
+- [`imara-diff`](https://github.com/pascalkuthe/imara-diff) — line-hunk producer over blob pairs
 - [`clap`](https://docs.rs/clap) — CLI
 - [`rayon`](https://docs.rs/rayon) — parallel churn walk, cohort fold, and tree-sitter snapshot
 
 ## Prior art we learn from
 
 - [**git-of-theseus**](https://github.com/erikbern/git-of-theseus) — cohort stacks + survival curves. Slow Python; we replace it with Rust + DuckDB.
-- [**hercules**](https://github.com/src-d/hercules) — one-pass DAG, coupling matrix, per-author burndown. We steal the analyses; drop the Babelfish/UAST dep (dead) and the Python plotter split.
+- [**hercules**](https://github.com/src-d/hercules) — one-pass DAG, coupling matrix, per-author burndown. We reuse the analyses in a smaller dep footprint.
