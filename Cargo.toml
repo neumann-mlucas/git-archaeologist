@@ -25,8 +25,10 @@ gix = { version = "0.66", default-features = false, features = [
     "blob-diff",
 ] }
 
-# Tree-sitter — 7 built-in grammars per SPEC §Language stack. Post-v1
-# grammars will land behind Cargo features.
+# Tree-sitter — every grammar that tracks the current 0.23/0.24/0.25
+# LanguageFn API. Grammars pinned older than that don't link against
+# tree-sitter 0.26. Additions are cheap at runtime (extension-map
+# lookup) — only compile-time + binary size grows.
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
@@ -35,6 +37,19 @@ tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
+tree-sitter-lua = "0.5"
+tree-sitter-vim = "0.4"
+tree-sitter-java = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-bash = "0.25"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-php = "0.23"
+tree-sitter-ocaml = "0.24"
+tree-sitter-scala = "0.24"
+tree-sitter-haskell = "0.23"
+tree-sitter-md = "0.3"
 
 # Cache — OLAP columnar embedded engine. Unbundled: `cargo dist` runners
 # link libduckdb at build time so end-user prebuilt binaries need nothing

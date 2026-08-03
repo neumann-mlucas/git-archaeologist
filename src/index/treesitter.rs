@@ -194,6 +194,165 @@ impl LangRegistry {
                 test_detect: TestDetect::None,
             },
         );
+        add(
+            &["lua"],
+            LangSpec {
+                label: "Lua",
+                language: tree_sitter_lua::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["function_declaration"],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["vim"],
+            LangSpec {
+                label: "Vim Script",
+                // Older API: `fn language() -> Language` instead of a
+                // `LANGUAGE: LanguageFn` const like everyone else. No
+                // .into() call.
+                language: tree_sitter_vim::language(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["java"],
+            LangSpec {
+                label: "Java",
+                language: tree_sitter_java::LANGUAGE.into(),
+                comment_kinds: &["line_comment", "block_comment"],
+                fn_kinds: &[],
+                method_kinds: &["method_declaration", "constructor_declaration"],
+                method_ancestor_kinds: &["class_declaration"],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["rb"],
+            LangSpec {
+                label: "Ruby",
+                language: tree_sitter_ruby::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["method"],
+                method_kinds: &[],
+                method_ancestor_kinds: &["class"],
+                test_detect: TestDetect::NamePrefix("test_"),
+            },
+        );
+        add(
+            &["sh", "bash"],
+            LangSpec {
+                label: "Bash",
+                language: tree_sitter_bash::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["html", "htm"],
+            LangSpec {
+                label: "HTML",
+                language: tree_sitter_html::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &[],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["css"],
+            LangSpec {
+                label: "CSS",
+                language: tree_sitter_css::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &[],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["json"],
+            LangSpec {
+                label: "JSON",
+                language: tree_sitter_json::LANGUAGE.into(),
+                comment_kinds: &[],
+                fn_kinds: &[],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["php"],
+            LangSpec {
+                label: "PHP",
+                language: tree_sitter_php::LANGUAGE_PHP.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &["method_declaration"],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["ml", "mli"],
+            LangSpec {
+                label: "OCaml",
+                language: tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["let_binding"],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["scala", "sc"],
+            LangSpec {
+                label: "Scala",
+                language: tree_sitter_scala::LANGUAGE.into(),
+                comment_kinds: &["comment", "block_comment"],
+                fn_kinds: &["function_definition"],
+                method_kinds: &[],
+                method_ancestor_kinds: &["class_definition", "object_definition"],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["hs"],
+            LangSpec {
+                label: "Haskell",
+                language: tree_sitter_haskell::LANGUAGE.into(),
+                comment_kinds: &["comment"],
+                fn_kinds: &["function"],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["md", "markdown"],
+            LangSpec {
+                label: "Markdown",
+                language: tree_sitter_md::LANGUAGE.into(),
+                comment_kinds: &[],
+                fn_kinds: &[],
+                method_kinds: &[],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
 
         Self {
             by_ext: m,
@@ -855,7 +1014,7 @@ int main() {
         assert!(r.spec_for("foo.ts").is_some());
         assert!(r.spec_for("foo.tsx").is_some());
         assert!(r.spec_for("Cargo.toml").is_none());
-        assert!(r.spec_for("README.md").is_none());
+        assert!(r.spec_for("README.md").is_some()); // Markdown grammar added
         assert!(r.spec_for("foo.unknown").is_none());
         assert!(r.spec_for("no_extension").is_none());
     }

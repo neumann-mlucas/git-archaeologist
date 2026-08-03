@@ -1,3 +1,8 @@
 /target
 Cargo.lock
-/.claude/
+# Ignore local Claude state (settings.local.json, task locks) but keep
+# repo-scoped skills tracked. Convention: skills live at
+# `.claude/skills/<name>/` and are symlinked into `~/.claude/skills/`
+# for global availability.
+/.claude/*
+!/.claude/skills/

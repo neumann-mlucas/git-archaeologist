@@ -172,28 +172,38 @@ the fixed rule. Anything more exotic → `git-arch sql "SELECT ..."`.
 
 `aliases.toml` schema unchanged from prior spec.
 
-## Language stack — tree-sitter, 7 grammars
+## Language stack — tree-sitter, 20 grammars
 
 V1 grammars linked in statically:
+
+**Core 9** — full function-level extraction:
 
 - Rust
 - Python
 - JavaScript
 - TypeScript (covers `.ts` + `.tsx`)
 - Go
-- C
+- C (covers `.c` + `.h`)
 - C++
+- Lua
+- Vim Script
+
+**Extended 11** — full comment / LOC extraction; function extraction is
+best-effort using conventional node names:
+
+- Java, Ruby, Bash, HTML, CSS, JSON, PHP, OCaml, Scala, Haskell,
+  Markdown
 
 Non-negotiables:
-- Function-level metrics only work for these 7 in v1.
-- Line-level metrics (comment density, code/blank split) also
-  tree-sitter for these 7; other languages fall back to an
+- Detection: extension → language. No content sniffing.
+- Files whose extension isn't in the registry fall back to an
   extension-map heuristic (single-line comment prefix + block delimiters
   by ext) so burndown-by-language keeps working.
-- Detection: extension → language. No content sniffing in v1.
 
-Post-v1 grammars are pure add — each new grammar is a Cargo feature
-flag, opt-in, does not slow default build.
+Post-v1 additions still land as pure adds — each new grammar is a
+Cargo line + a `LangSpec` entry, does not slow default build meaningfully
+(binary +~1 MB per grammar; zero runtime cost unless the repo has
+matching files).
 
 ## Output
 
