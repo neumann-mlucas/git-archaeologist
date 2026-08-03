@@ -37,12 +37,7 @@ impl AuthorResolver {
     }
 
     /// Get or insert the DB `authors.id` for a raw (name, email) pair.
-    pub fn resolve(
-        &mut self,
-        conn: &Connection,
-        raw_name: &str,
-        raw_email: &str,
-    ) -> Result<i64> {
+    pub fn resolve(&mut self, conn: &Connection, raw_name: &str, raw_email: &str) -> Result<i64> {
         let key = (raw_name.to_string(), raw_email.to_string());
         if let Some(id) = self.id_cache.get(&key) {
             return Ok(*id);
@@ -77,7 +72,10 @@ impl AuthorResolver {
 
     fn canonicalize(&self, raw_name: &str, raw_email: &str) -> (String, String) {
         // User overrides win over .mailmap.
-        if let Some((n, e)) = self.user_override.get(&(raw_name.to_string(), raw_email.to_string())) {
+        if let Some((n, e)) = self
+            .user_override
+            .get(&(raw_name.to_string(), raw_email.to_string()))
+        {
             return (n.clone(), e.clone());
         }
 

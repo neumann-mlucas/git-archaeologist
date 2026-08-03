@@ -60,8 +60,8 @@ pub fn walk(repo: &Repo, ignore_revs: &HashSet<String>) -> Result<Vec<CommitInfo
         let committer = commit.committer().context("decoding commit committer")?;
         let time = committer.time; // author's clock can be edited; committer's is closer to "when landed"
 
-        let committed_at = OffsetDateTime::from_unix_timestamp(time.seconds)
-            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let committed_at =
+            OffsetDateTime::from_unix_timestamp(time.seconds).unwrap_or(OffsetDateTime::UNIX_EPOCH);
 
         let msg_ref = commit.message_raw().context("decoding commit message")?;
         let msg = msg_ref.to_str_lossy();
@@ -106,7 +106,9 @@ fn ref_tips(repo: &Repo) -> Result<Vec<gix::ObjectId>> {
     let refs = repo.git.references().context("opening ref platform")?;
     for res in refs.all().context("iterating all refs")? {
         let Ok(mut r) = res else { continue };
-        let Ok(id) = r.peel_to_id_in_place() else { continue };
+        let Ok(id) = r.peel_to_id_in_place() else {
+            continue;
+        };
         let id = id.detach();
         if seen.insert(id) {
             out.push(id);
@@ -124,7 +126,9 @@ pub fn tags(repo: &Repo) -> Result<Vec<TagInfo>> {
         let name = r.name().shorten().to_string();
 
         // Peel to the target commit id.
-        let Ok(peeled_id) = r.peel_to_id_in_place() else { continue };
+        let Ok(peeled_id) = r.peel_to_id_in_place() else {
+            continue;
+        };
         let commit_id = peeled_id.detach();
 
         // Tag date: annotated tag has its own tagger time; lightweight tag

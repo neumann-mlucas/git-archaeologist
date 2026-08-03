@@ -45,17 +45,13 @@ pub fn bucket_key(ts: OffsetDateTime, size: BucketSize) -> i64 {
         BucketSize::Commit => ts.unix_timestamp(),
         BucketSize::Day => {
             let d = ts.date();
-            (d.year() as i64) * 10_000
-                + (u8::from(d.month()) as i64) * 100
-                + (d.day() as i64)
+            (d.year() as i64) * 10_000 + (u8::from(d.month()) as i64) * 100 + (d.day() as i64)
         }
         BucketSize::Week => {
             let (iso_year, iso_week, _) = ts.date().to_iso_week_date();
             (iso_year as i64) * 100 + (iso_week as i64)
         }
-        BucketSize::Month => {
-            (ts.year() as i64) * 100 + (u8::from(ts.month()) as i64)
-        }
+        BucketSize::Month => (ts.year() as i64) * 100 + (u8::from(ts.month()) as i64),
         BucketSize::Tag => {
             unreachable!("BucketSize::Tag requires tag_bucket_key(ts, tag_dates)")
         }
@@ -82,10 +78,7 @@ mod tests {
     #[test]
     fn commit_bucket_is_unix_seconds() {
         let ts = datetime!(2025-03-15 12:00:00 UTC);
-        assert_eq!(
-            bucket_key(ts, BucketSize::Commit),
-            ts.unix_timestamp()
-        );
+        assert_eq!(bucket_key(ts, BucketSize::Commit), ts.unix_timestamp());
     }
 
     #[test]

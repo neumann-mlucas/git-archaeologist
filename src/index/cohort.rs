@@ -162,7 +162,7 @@ fn apply_commit(
     bucket: i64,
     hunks_group: &[&HunkRow],
 ) -> Vec<(String, i64)> {
-    let mut sorted: Vec<&HunkRow> = hunks_group.iter().copied().collect();
+    let mut sorted: Vec<&HunkRow> = hunks_group.to_vec();
     sorted.sort_by_key(|h| h.old_start);
 
     let mut new_state: Vec<(String, i64)> = Vec::with_capacity(prev.len());
@@ -231,10 +231,7 @@ mod tests {
     #[test]
     fn subsequent_modification_updates_birth_of_new_lines_only() {
         // A: add 4 lines. B: replace line 2 with 2 new lines.
-        let hunks = vec![
-            mk("A", 100, "f", 0, 0, 1, 4),
-            mk("B", 200, "f", 2, 1, 2, 2),
-        ];
+        let hunks = vec![mk("A", 100, "f", 0, 0, 1, 4), mk("B", 200, "f", 2, 1, 2, 2)];
         let state = fold_file(&hunks);
         // Result: [A, B, B, A, A]  (line1=A, lines2-3=B, lines4-5=A originals 3+4)
         assert_eq!(state.len(), 5);
@@ -247,18 +244,14 @@ mod tests {
 
     #[test]
     fn full_delete_leaves_empty_state() {
-        let hunks = vec![
-            mk("A", 100, "f", 0, 0, 1, 5),
-            mk("B", 200, "f", 1, 5, 0, 0),
-        ];
+        let hunks = vec![mk("A", 100, "f", 0, 0, 1, 5), mk("B", 200, "f", 1, 5, 0, 0)];
         let state = fold_file(&hunks);
         assert!(state.is_empty());
     }
 
     #[test]
     fn rename_alias_collapses_history() {
-        let alias: HashMap<String, String> =
-            [("old.rs".to_string(), "new.rs".to_string())].into();
+        let alias: HashMap<String, String> = [("old.rs".to_string(), "new.rs".to_string())].into();
         assert_eq!(resolve(&alias, "old.rs"), "new.rs");
         assert_eq!(resolve(&alias, "new.rs"), "new.rs");
     }

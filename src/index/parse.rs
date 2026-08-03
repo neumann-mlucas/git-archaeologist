@@ -177,7 +177,8 @@ mod tests {
 
     #[test]
     fn trailer_signoff_and_coauthor() {
-        let msg = "fix: bug\n\nCo-authored-by: \"Doe, John\" <j@x.org>\nSigned-off-by: Bob <bob@x>\n";
+        let msg =
+            "fix: bug\n\nCo-authored-by: \"Doe, John\" <j@x.org>\nSigned-off-by: Bob <bob@x>\n";
         let t = parse_trailers(msg);
         assert_eq!(t.len(), 2);
         assert_eq!(t[0].role, TrailerRole::Coauthor);

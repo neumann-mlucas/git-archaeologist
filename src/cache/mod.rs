@@ -21,8 +21,8 @@ pub fn open(path: impl AsRef<Path>) -> Result<Cache> {
             .with_context(|| format!("removing stale cache {}", path.display()))?;
     }
 
-    let conn = Connection::open(path)
-        .with_context(|| format!("opening cache at {}", path.display()))?;
+    let conn =
+        Connection::open(path).with_context(|| format!("opening cache at {}", path.display()))?;
     tune(&conn)?;
     schema::migrate(&conn)?;
     Ok(Cache { conn })

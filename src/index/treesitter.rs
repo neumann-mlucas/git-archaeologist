@@ -380,10 +380,7 @@ impl Default for LangRegistry {
 ///
 /// This is a straight win over the in-loop serial `snapshot()` when
 /// the repo has many sampled commits sharing files (the common case).
-pub fn batch_sampled(
-    repo: &Repo,
-    sampled_shas: &[String],
-) -> HashMap<String, Vec<FileSnapshot>> {
+pub fn batch_sampled(repo: &Repo, sampled_shas: &[String]) -> HashMap<String, Vec<FileSnapshot>> {
     // Phase 1: enumerate sampled trees. Serial — tree walks touch loose
     // objects, which gix caches per-repo; parallel here would fight the
     // cache.
@@ -601,9 +598,7 @@ fn build_def(source: &[u8], node: Node, spec: &LangSpec, is_method: bool) -> Opt
     let start_line = node.start_position().row as u32 + 1;
     let end_line = node.end_position().row as u32 + 1;
 
-    let mut kind = if is_method {
-        "method"
-    } else if ancestor_matches(node, spec.method_ancestor_kinds) {
+    let mut kind = if is_method || ancestor_matches(node, spec.method_ancestor_kinds) {
         "method"
     } else {
         "fn"
@@ -858,11 +853,8 @@ def add(a, b):
 
 # trailing
 ";
-        let (code, comments, blanks) = count(
-            tree_sitter_python::LANGUAGE.into(),
-            &["comment"],
-            src,
-        );
+        let (code, comments, blanks) =
+            count(tree_sitter_python::LANGUAGE.into(), &["comment"], src);
         assert_eq!(comments, 2);
         assert_eq!(blanks, 1);
         assert_eq!(code, 4);
@@ -879,11 +871,7 @@ func main() {
     println(\"hi\")
 }
 ";
-        let (code, comments, blanks) = count(
-            tree_sitter_go::LANGUAGE.into(),
-            &["comment"],
-            src,
-        );
+        let (code, comments, blanks) = count(tree_sitter_go::LANGUAGE.into(), &["comment"], src);
         assert_eq!(comments, 2);
         assert_eq!(blanks, 1);
         assert_eq!(code, 4);
@@ -902,11 +890,7 @@ int main() {
     return 0;
 }
 ";
-        let (code, comments, blanks) = count(
-            tree_sitter_cpp::LANGUAGE.into(),
-            &["comment"],
-            src,
-        );
+        let (code, comments, blanks) = count(tree_sitter_cpp::LANGUAGE.into(), &["comment"], src);
         assert_eq!(code, 5);
         assert_eq!(comments, 3);
         assert_eq!(blanks, 1);
@@ -956,7 +940,10 @@ mod tests {
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, "rs");
         let defs = parse_and_extract(src, &spec);
-        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        let by_name: HashMap<_, _> = defs
+            .iter()
+            .map(|d| (d.name.clone(), d.kind.clone()))
+            .collect();
         assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
         assert_eq!(by_name.get("t1").map(|s| s.as_str()), Some("test"));
         assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
@@ -979,7 +966,10 @@ class C:
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, "py");
         let defs = parse_and_extract(src, &spec);
-        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        let by_name: HashMap<_, _> = defs
+            .iter()
+            .map(|d| (d.name.clone(), d.kind.clone()))
+            .collect();
         assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
         assert_eq!(by_name.get("test_it").map(|s| s.as_str()), Some("test"));
         assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
@@ -999,9 +989,15 @@ func (r *Recv) Method() {}
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, "go");
         let defs = parse_and_extract(src, &spec);
-        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        let by_name: HashMap<_, _> = defs
+            .iter()
+            .map(|d| (d.name.clone(), d.kind.clone()))
+            .collect();
         assert_eq!(by_name.get("Regular").map(|s| s.as_str()), Some("fn"));
-        assert_eq!(by_name.get("TestSomething").map(|s| s.as_str()), Some("test"));
+        assert_eq!(
+            by_name.get("TestSomething").map(|s| s.as_str()),
+            Some("test")
+        );
         assert_eq!(by_name.get("Method").map(|s| s.as_str()), Some("method"));
     }
 
@@ -1034,7 +1030,10 @@ class C {
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, "js");
         let defs = parse_and_extract(src, &spec);
-        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        let by_name: HashMap<_, _> = defs
+            .iter()
+            .map(|d| (d.name.clone(), d.kind.clone()))
+            .collect();
         assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
         assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
     }
@@ -1051,7 +1050,10 @@ class C {
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, "ts");
         let defs = parse_and_extract(src, &spec);
-        let by_name: HashMap<_, _> = defs.iter().map(|d| (d.name.clone(), d.kind.clone())).collect();
+        let by_name: HashMap<_, _> = defs
+            .iter()
+            .map(|d| (d.name.clone(), d.kind.clone()))
+            .collect();
         assert_eq!(by_name.get("top").map(|s| s.as_str()), Some("fn"));
         assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
     }

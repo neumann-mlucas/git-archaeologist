@@ -83,10 +83,7 @@ impl Filters {
     pub fn lang_where(&self, lang_col: &str) -> String {
         match &self.langs {
             Some(ls) if !ls.is_empty() => {
-                let list: Vec<String> = ls
-                    .iter()
-                    .map(|l| format!("'{}'", sql_escape(l)))
-                    .collect();
+                let list: Vec<String> = ls.iter().map(|l| format!("'{}'", sql_escape(l))).collect();
                 format!(" AND LOWER({lang_col}) IN ({})", list.join(","))
             }
             _ => String::new(),
@@ -117,7 +114,8 @@ fn parse_to_date(s: &str) -> Result<i64> {
 }
 
 fn parse_ymd(s: &str) -> Result<Date> {
-    Date::parse(s, &Iso8601::DATE).with_context(|| format!("invalid date {s:?}, expected YYYY-MM-DD"))
+    Date::parse(s, &Iso8601::DATE)
+        .with_context(|| format!("invalid date {s:?}, expected YYYY-MM-DD"))
 }
 
 fn sql_escape(s: &str) -> String {
@@ -216,14 +214,9 @@ pub fn churn(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
              FROM   file_churn fc
              JOIN   commits    c  ON c.sha = fc.sha
              JOIN   authors    au ON au.id = c.author_id
-             {}
              WHERE  c.is_merge = FALSE {filter} {path_filter}
              GROUP  BY bucket, author
-             ORDER  BY bucket, added DESC",
-            // If the filter join also aliased `a`, we'd double-alias. Keep
-            // it simple: reuse the same `authors a` alias so filters
-            // matching by name still work.
-            if filters.author.is_some() { "" } else { "" }
+             ORDER  BY bucket, added DESC"
         ),
         other => bail!("--by must be one of module|lang|author, got {other:?}"),
     };
@@ -551,7 +544,11 @@ fn fit_half_life(table: &Table) -> Result<Table> {
         }
     }
 
-    let headers = vec!["metric".to_string(), "value".to_string(), "reason".to_string()];
+    let headers = vec![
+        "metric".to_string(),
+        "value".to_string(),
+        "reason".to_string(),
+    ];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
     if total_deaths < 100 || xs.len() < 2 {

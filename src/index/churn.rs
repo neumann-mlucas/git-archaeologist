@@ -49,9 +49,7 @@ const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 /// Walk every non-merge commit reachable from HEAD; return the
 /// `(sha, first-parent-oid)` job list the chunked indexer slices into
 /// windows. Merge commits are silently dropped.
-pub fn collect_all_jobs(
-    repo: &Repo,
-) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
+pub fn collect_all_jobs(repo: &Repo) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
     let head_id = repo.git.head_id().context("resolving HEAD id")?;
     let walk = repo
         .git
@@ -68,10 +66,7 @@ pub fn collect_all_jobs(
         if parents.len() > 1 {
             continue;
         }
-        jobs.push((
-            commit.id().to_string(),
-            parents.first().map(|p| p.detach()),
-        ));
+        jobs.push((commit.id().to_string(), parents.first().map(|p| p.detach())));
     }
     Ok(jobs)
 }
@@ -99,11 +94,7 @@ pub fn process_jobs(
 
 /// Compute the (hunks, churn) delta for a single commit against its
 /// first parent. Blob reads reuse the worker-local `gix::Repository`.
-fn diff_one(
-    git: &gix::Repository,
-    sha: &str,
-    parent_id: Option<&gix::ObjectId>,
-) -> CommitDiff {
+fn diff_one(git: &gix::Repository, sha: &str, parent_id: Option<&gix::ObjectId>) -> CommitDiff {
     let mut diff = CommitDiff::default();
 
     let commit = match git.find_commit(gix::ObjectId::from_hex(sha.as_bytes()).unwrap()) {
@@ -124,18 +115,21 @@ fn diff_one(
         Ok(p) => p,
         Err(_) => return diff,
     };
-    platform.track_path().track_rewrites(Some(Rewrites::default()));
+    platform
+        .track_path()
+        .track_rewrites(Some(Rewrites::default()));
 
-    let _ = platform.for_each_to_obtain_tree(
-        &tree,
-        |change| -> Result<
-            gix::object::tree::diff::Action,
-            Box<dyn std::error::Error + Send + Sync>,
-        > {
-            handle_change(git, change, &mut diff);
-            Ok(gix::object::tree::diff::Action::Continue)
-        },
-    );
+    let _ =
+        platform.for_each_to_obtain_tree(
+            &tree,
+            |change| -> Result<
+                gix::object::tree::diff::Action,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                handle_change(git, change, &mut diff);
+                Ok(gix::object::tree::diff::Action::Continue)
+            },
+        );
 
     diff
 }

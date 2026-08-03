@@ -345,8 +345,7 @@ fn run_export(
     format: ExportFormat,
     out_dir: &std::path::Path,
 ) -> Result<()> {
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("creating {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
 
     for table in TABLES {
         let (ext, opts) = match format {
@@ -433,9 +432,24 @@ fn render(headers: &[String], rows: &[Vec<String>], format: Format) -> Result<()
             }
         }
         Format::Csv => {
-            writeln!(out, "{}", headers.iter().map(|s| csv_escape(s)).collect::<Vec<_>>().join(","))?;
+            writeln!(
+                out,
+                "{}",
+                headers
+                    .iter()
+                    .map(|s| csv_escape(s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )?;
             for r in rows {
-                writeln!(out, "{}", r.iter().map(|s| csv_escape(s)).collect::<Vec<_>>().join(","))?;
+                writeln!(
+                    out,
+                    "{}",
+                    r.iter()
+                        .map(|s| csv_escape(s))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )?;
             }
         }
         Format::Json => {

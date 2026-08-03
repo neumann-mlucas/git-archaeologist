@@ -19,8 +19,7 @@ impl Repo {
     /// Linux: ~/.local/share/git-archaeologist/caches/<key>/cache.duckdb
     /// macOS: ~/Library/Application Support/git-archaeologist/caches/…
     pub fn cache_path(&self) -> PathBuf {
-        let dirs = ProjectDirs::from("", "", "git-archaeologist")
-            .expect("resolving XDG data dir");
+        let dirs = ProjectDirs::from("", "", "git-archaeologist").expect("resolving XDG data dir");
         dirs.data_dir()
             .join("caches")
             .join(cache_key(&self.root))
@@ -43,10 +42,7 @@ impl Repo {
 
 fn cache_key(root: &Path) -> String {
     let canonical = root.to_string_lossy();
-    let name = root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("repo");
+    let name = root.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     h.write(canonical.as_bytes());
     let hash = h.finish();

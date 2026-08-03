@@ -22,11 +22,7 @@ pub struct IndexOptions {
     pub bucket_override: Option<BucketSize>,
 }
 
-pub fn run(
-    repo: &Repo,
-    cache: &mut Cache,
-    opts: IndexOptions,
-) -> Result<()> {
+pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     let ignore_revs = parse::load_ignore_revs(&repo.root);
 
     let all_commits = walker::walk(repo, &ignore_revs)?;
@@ -87,10 +83,8 @@ pub fn run(
     // each chunk's churn call can slice into it instead of re-walking
     // rev-list per chunk. Also index by sha for O(1) chunk lookup.
     let all_jobs = churn::collect_all_jobs(repo).unwrap_or_default();
-    let job_by_sha: std::collections::HashMap<String, (String, Option<gix::ObjectId>)> = all_jobs
-        .iter()
-        .map(|j| (j.0.clone(), j.clone()))
-        .collect();
+    let job_by_sha: std::collections::HashMap<String, (String, Option<gix::ObjectId>)> =
+        all_jobs.iter().map(|j| (j.0.clone(), j.clone())).collect();
 
     // Appender flush happens once per chunk boundary (below), not per
     // commit. Each flush syncs 7 tables to disk; batching them at the
@@ -153,7 +147,11 @@ pub fn run(
     // window of commits, then run the insert loop over that window,
     // then drop the window's data before moving on. Peak RSS is now
     // ~one window instead of the whole repo.
-    let commit_pairs: Vec<_> = all_commits.iter().zip(assignments.iter()).enumerate().collect();
+    let commit_pairs: Vec<_> = all_commits
+        .iter()
+        .zip(assignments.iter())
+        .enumerate()
+        .collect();
     for window in commit_pairs.chunks(INDEX_CHUNK) {
         // Pending shas in this window (skip already-indexed).
         let pending_shas: Vec<String> = window
@@ -196,11 +194,8 @@ pub fn run(
 
             let author_id =
                 resolver.resolve(&cache.conn, &commit.author_name, &commit.author_email)?;
-            let committer_id = resolver.resolve(
-                &cache.conn,
-                &commit.committer_name,
-                &commit.committer_email,
-            )?;
+            let committer_id =
+                resolver.resolve(&cache.conn, &commit.committer_name, &commit.committer_email)?;
 
             commits_app.append_row(params![
                 commit.sha,
@@ -271,7 +266,11 @@ pub fn run(
             let now = std::time::Instant::now();
             if done == total || now.duration_since(last_progress_at) >= progress_interval {
                 let elapsed = now.duration_since(start_at).as_secs_f64();
-                let rate = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
+                let rate = if elapsed > 0.0 {
+                    done as f64 / elapsed
+                } else {
+                    0.0
+                };
                 let eta_s = if rate > 0.0 {
                     (total - done) as f64 / rate
                 } else {

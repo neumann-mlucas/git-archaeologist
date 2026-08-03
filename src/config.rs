@@ -48,8 +48,8 @@ impl Loaded {
 }
 
 pub fn load() -> Result<Loaded> {
-    let dirs = ProjectDirs::from("", "", "git-archaeologist")
-        .context("resolving user config dir")?;
+    let dirs =
+        ProjectDirs::from("", "", "git-archaeologist").context("resolving user config dir")?;
     let cfg_dir = dirs.config_dir().to_path_buf();
     std::fs::create_dir_all(&cfg_dir).ok();
 
@@ -63,8 +63,8 @@ pub fn load() -> Result<Loaded> {
 }
 
 fn read_toml<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let val = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(val)
 }

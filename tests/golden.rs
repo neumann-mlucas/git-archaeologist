@@ -81,14 +81,7 @@ fn git(dir: &Path, args: &[&str], envs: &[(&str, &str)]) {
 }
 
 /// Commit a set of file edits with a fixed author + date.
-fn commit(
-    dir: &Path,
-    author: &str,
-    email: &str,
-    date: &str,
-    msg: &str,
-    files: &[(&str, &str)],
-) {
+fn commit(dir: &Path, author: &str, email: &str, date: &str, msg: &str, files: &[(&str, &str)]) {
     for (path, body) in files {
         let full = dir.join(path);
         if let Some(parent) = full.parent() {
@@ -163,10 +156,7 @@ fn build_fixture(dir: &Path) {
         "bob@example.com",
         "2025-01-04T00:00:00Z",
         "feat: python helper",
-        &[(
-            "src/util.py",
-            "def helper():\n    return 42\n",
-        )],
+        &[("src/util.py", "def helper():\n    return 42\n")],
     );
     commit(
         dir,
@@ -174,10 +164,7 @@ fn build_fixture(dir: &Path) {
         "bob@example.com",
         "2025-01-05T00:00:00Z",
         "feat: js entry",
-        &[(
-            "web/app.js",
-            "function greet() { return 'hi'; }\n",
-        )],
+        &[("web/app.js", "function greet() { return 'hi'; }\n")],
     );
     commit(
         dir,
@@ -185,10 +172,7 @@ fn build_fixture(dir: &Path) {
         "bob@example.com",
         "2025-01-06T00:00:00Z",
         "feat(ui): typescript config",
-        &[(
-            "web/config.ts",
-            "export const NAME: string = 'demo';\n",
-        )],
+        &[("web/config.ts", "export const NAME: string = 'demo';\n")],
     );
 
     // c7 — Carol adds Go, C, C++.
@@ -209,10 +193,7 @@ fn build_fixture(dir: &Path) {
         "carol@example.com",
         "2025-01-08T00:00:00Z",
         "feat: c core",
-        &[(
-            "native/core.c",
-            "int add(int a, int b) { return a + b; }\n",
-        )],
+        &[("native/core.c", "int add(int a, int b) { return a + b; }\n")],
     );
     commit(
         dir,
@@ -397,7 +378,10 @@ fn build_fixture(dir: &Path) {
                 &format!("chore: multi-file {i}"),
                 &[
                     ("src/util.py", &format!("def helper():\n    return {i}\n")),
-                    ("web/app.js", &format!("function greet() {{ return 'hi{i}'; }}\n")),
+                    (
+                        "web/app.js",
+                        &format!("function greet() {{ return 'hi{i}'; }}\n"),
+                    ),
                 ],
             );
         } else {
@@ -407,10 +391,7 @@ fn build_fixture(dir: &Path) {
                 email,
                 &format!("2025-01-{day}T00:00:00Z"),
                 &format!("chore: filler {i}"),
-                &[(
-                    "src/util.py",
-                    &format!("def helper():\n    return {i}\n"),
-                )],
+                &[("src/util.py", &format!("def helper():\n    return {i}\n"))],
             );
         }
     }
@@ -439,8 +420,12 @@ fn tier1_golden_integration() {
     );
 
     // --- row invariants via sql ---
-    let commits =
-        fx.arch_stdout(&["sql", "SELECT COUNT(*) AS n FROM commits", "--format", "tsv"]);
+    let commits = fx.arch_stdout(&[
+        "sql",
+        "SELECT COUNT(*) AS n FROM commits",
+        "--format",
+        "tsv",
+    ]);
     // 30 fixture commits + 1 merge = 31 in the DAG (all reachable from HEAD).
     let n: i64 = commits
         .lines()
@@ -466,7 +451,11 @@ fn tier1_golden_integration() {
         "--format",
         "tsv",
     ]);
-    let tcount: i64 = trailers.lines().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let tcount: i64 = trailers
+        .lines()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     assert!(tcount >= 1, "expected >= 1 trailer row, got {tcount}");
 
     let ignored = fx.arch_stdout(&[
@@ -475,8 +464,15 @@ fn tier1_golden_integration() {
         "--format",
         "tsv",
     ]);
-    let icount: i64 = ignored.lines().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    assert!(icount >= 1, "expected >= 1 ignored_blame commit, got {icount}");
+    let icount: i64 = ignored
+        .lines()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        icount >= 1,
+        "expected >= 1 ignored_blame commit, got {icount}"
+    );
 
     let renames = fx.arch_stdout(&[
         "sql",
@@ -484,19 +480,41 @@ fn tier1_golden_integration() {
         "--format",
         "tsv",
     ]);
-    let rcount: i64 = renames.lines().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let rcount: i64 = renames
+        .lines()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     assert!(rcount >= 1, "expected >= 1 rename hunk row, got {rcount}");
 
     // --- every subcommand exits 0 with non-empty stdout ---
     for (label, args) in [
-        ("burndown-lang", vec!["burndown", "--by", "language", "--format", "tsv"]),
-        ("burndown-author", vec!["burndown", "--by", "author", "--format", "tsv"]),
+        (
+            "burndown-lang",
+            vec!["burndown", "--by", "language", "--format", "tsv"],
+        ),
+        (
+            "burndown-author",
+            vec!["burndown", "--by", "author", "--format", "tsv"],
+        ),
         ("classify", vec!["classify", "--format", "tsv"]),
-        ("churn-module", vec!["churn", "--by", "module", "--format", "tsv"]),
-        ("churn-author", vec!["churn", "--by", "author", "--format", "tsv"]),
+        (
+            "churn-module",
+            vec!["churn", "--by", "module", "--format", "tsv"],
+        ),
+        (
+            "churn-author",
+            vec!["churn", "--by", "author", "--format", "tsv"],
+        ),
         ("age", vec!["age", "--format", "tsv"]),
-        ("coupling", vec!["coupling", "--top", "5", "--format", "tsv"]),
-        ("hotspot", vec!["hotspot", "--lang", "rust", "--top", "5", "--format", "tsv"]),
+        (
+            "coupling",
+            vec!["coupling", "--top", "5", "--format", "tsv"],
+        ),
+        (
+            "hotspot",
+            vec!["hotspot", "--lang", "rust", "--top", "5", "--format", "tsv"],
+        ),
         ("cohort", vec!["cohort", "--format", "tsv"]),
         ("survival", vec!["survival", "--format", "tsv"]),
     ] {
@@ -526,6 +544,10 @@ fn tier1_golden_integration() {
     ] {
         let p = out_dir.join(format!("{table}.parquet"));
         assert!(p.exists(), "missing parquet: {}", p.display());
-        assert!(std::fs::metadata(&p).unwrap().len() > 0, "empty: {}", p.display());
+        assert!(
+            std::fs::metadata(&p).unwrap().len() > 0,
+            "empty: {}",
+            p.display()
+        );
     }
 }

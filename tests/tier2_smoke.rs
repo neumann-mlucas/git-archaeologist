@@ -152,7 +152,10 @@ impl Env {
             out.status,
             String::from_utf8_lossy(&out.stderr)
         );
-        (String::from_utf8(out.stdout).expect("utf-8 stdout"), elapsed)
+        (
+            String::from_utf8(out.stdout).expect("utf-8 stdout"),
+            elapsed,
+        )
     }
 }
 
@@ -169,7 +172,13 @@ fn git_count_head(repo: &Path) -> Option<i64> {
 }
 
 fn parse_i64(tsv_2nd_line: &str) -> Option<i64> {
-    tsv_2nd_line.lines().nth(1)?.split('\t').next()?.parse().ok()
+    tsv_2nd_line
+        .lines()
+        .nth(1)?
+        .split('\t')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Tier 2 real-world smoke. Runs on `cargo test --features e2e`.
@@ -219,12 +228,7 @@ fn tier2_public_repo_smoke() {
     // DB is a superset of HEAD when the fixture repo has extra refs
     // (older tags branched off). Assert >= HEAD, not ==.
     let head_count = git_count_head(&repo).expect("git rev-list count");
-    let (rows, _) = env.arch_stdout(&[
-        "sql",
-        "SELECT COUNT(*) FROM commits",
-        "--format",
-        "tsv",
-    ]);
+    let (rows, _) = env.arch_stdout(&["sql", "SELECT COUNT(*) FROM commits", "--format", "tsv"]);
     let db_count = parse_i64(&rows).expect("parse commits count");
     assert!(
         db_count >= head_count,
@@ -233,13 +237,30 @@ fn tier2_public_repo_smoke() {
 
     // --- every subcommand exits 0, non-empty, under the query ceiling ---
     for (label, args) in [
-        ("burndown-lang", vec!["burndown", "--by", "language", "--format", "tsv"]),
-        ("burndown-author", vec!["burndown", "--by", "author", "--format", "tsv"]),
+        (
+            "burndown-lang",
+            vec!["burndown", "--by", "language", "--format", "tsv"],
+        ),
+        (
+            "burndown-author",
+            vec!["burndown", "--by", "author", "--format", "tsv"],
+        ),
         ("classify", vec!["classify", "--format", "tsv"]),
-        ("churn-module", vec!["churn", "--by", "module", "--format", "tsv"]),
+        (
+            "churn-module",
+            vec!["churn", "--by", "module", "--format", "tsv"],
+        ),
         ("age", vec!["age", "--format", "tsv"]),
-        ("coupling", vec!["coupling", "--top", "10", "--format", "tsv"]),
-        ("hotspot", vec!["hotspot", "--lang", "rust", "--top", "10", "--format", "tsv"]),
+        (
+            "coupling",
+            vec!["coupling", "--top", "10", "--format", "tsv"],
+        ),
+        (
+            "hotspot",
+            vec![
+                "hotspot", "--lang", "rust", "--top", "10", "--format", "tsv",
+            ],
+        ),
         ("cohort", vec!["cohort", "--format", "tsv"]),
         ("survival", vec!["survival", "--format", "tsv"]),
     ] {
@@ -275,12 +296,8 @@ fn tier2_public_repo_smoke() {
     let total_code = parse_i64(&total_row).unwrap_or(0) as f64;
     // `line_births` holds one row per surviving line at HEAD, so a plain
     // COUNT(*) is the surviving-lines total.
-    let (cohort_row, _) = env.arch_stdout(&[
-        "sql",
-        "SELECT COUNT(*) FROM line_births",
-        "--format",
-        "tsv",
-    ]);
+    let (cohort_row, _) =
+        env.arch_stdout(&["sql", "SELECT COUNT(*) FROM line_births", "--format", "tsv"]);
     let cohort_alive = parse_i64(&cohort_row).unwrap_or(0) as f64;
 
     if total_code > 0.0 {
@@ -292,16 +309,17 @@ fn tier2_public_repo_smoke() {
     }
 
     // --- coupling top row has co_commits > 1 ---
-    let (coup, _) = env.arch_stdout(&[
-        "coupling",
-        "--top",
-        "1",
-        "--format",
-        "tsv",
-    ]);
+    let (coup, _) = env.arch_stdout(&["coupling", "--top", "1", "--format", "tsv"]);
     let line = coup.lines().nth(1).unwrap_or("");
-    let co: i64 = line.split('\t').nth(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-    assert!(co > 1, "coupling top pair should have co_commits > 1; got {co} from row {line:?}");
+    let co: i64 = line
+        .split('\t')
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        co > 1,
+        "coupling top pair should have co_commits > 1; got {co} from row {line:?}"
+    );
 
     eprintln!(
         "tier2 ok — index {index_elapsed:?} (ceiling {PERF_INDEX_CEILING:?}), commits {db_count}"
