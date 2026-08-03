@@ -119,8 +119,39 @@ two smaller ones. All fixed on top of the existing Phase 1 code:
       parallelism across files deferred to v1.x perf polish.
 - [x] Materialize `line_births(path, line_no, birth_sha, birth_bucket)`
       as a table; rebuilt on every `index` run.
-- [ ] Incremental: rerun fold only for files whose hunk set changed.
-      Deferred to v1.x — full-rebuild is fast enough at v1 scale.
+- [ ] Incremental cohort fold — rerun only for paths whose hunk set
+      changed. Deferred to v1.x; spec below. Full-rebuild is fast enough
+      at v1 scale, so this only earns its keep once repo size or reindex
+      cadence makes the ~27 s ratatui fold visible.
+
+  **Trigger.** Incremental reindex path (`already: HashSet<String>` in
+  `walker.rs` already knows the delta). If `meta.line_births_head` is
+  missing or ≠ current indexed head, fall back to full rebuild — the
+  fold is deterministic, so a mismatch means we've drifted and the safe
+  reset is cheap.
+
+  **Change set.** Rebuild the rename alias map from the union of old +
+  new `hunks.prev_path`. For every non-merge commit in the delta,
+  resolve each touched `path` through the updated alias map → set
+  `changed_canonical`. If a new rename remaps an old canonical (i.e. a
+  canonical key disappears from the map), add both the old and new
+  canonical to the set — the old bucket's rows now belong under the new
+  key.
+
+  **Fold delta.** `DELETE FROM line_births WHERE path IN
+  (changed_canonical)`, then `par_iter` over that subset the same way
+  `fold_and_materialize` already does (`src/index/cohort.rs:72`). Load
+  hunks with `WHERE path IN (…) OR prev_path IN (…)` so the per-file
+  replay still sees the full history for those canonicals.
+
+  **Correctness guard.** Store `line_births_head = <indexed head sha>`
+  in `meta` at end of fold. Add a `--rebuild-cohort` flag on `reindex`
+  as the manual override. Tier 1 golden gains a "run N incremental
+  commits, assert row-for-row identical to full rebuild" step.
+
+  **Perf acceptance.** 10 new commits on ratatui-scale cache: fold
+  completes < 500 ms (≈ full-rebuild time × changed_paths / total_paths).
+  Miss the bar → keep full rebuild, close the ticket.
 
 ## Phase 4 — query subcommands (SPEC §Metrics) ✅
 
@@ -290,6 +321,28 @@ the bucket universe.
   or materialize the (bucket, cohort) grid at index time.
 - Validate against `astral-sh/uv` (~15 k commits) and `godotengine/godot`
   (~60 k) via Tier 3 harness. Both fixtures are already in the plan.
+
+### Ponytail debt (deliberate shortcuts with named upgrade paths)
+
+Tracked so the `ponytail:` markers in source don't rot into "later
+means never". Each entry names the file, the ceiling, and what earns
+the upgrade.
+
+- **`src/cache/mod.rs:55` — DuckDB memory_limit hard-coded at 12 GB.**
+  Ceiling: hosts with < 12 GB free RAM will still OOM on a 100k-commit
+  fold. Upgrade path: read `memory_limit` from `config.toml` (add to
+  the shrunk-in-Phase-1 config), fallback 12 GB. Trigger: a real user
+  reports the ceiling, or Tier 3 harness on godot exceeds it.
+- **`tests/tier2_smoke.rs:10` — tier-2 fixture pinned by tag not SHA.**
+  Ceiling: ratatui-org can retag or force-push `v0.25.0` and silently
+  flip the fixture. Upgrade path: fold into `benches/fixtures.toml`
+  SHA pin when Tier 3 lands (§Phase 5 Tier 3). One source of truth.
+- **`skills/git-arch-analyze/run.sh:8` — skill has no flags beyond
+  repo path.** Ceiling: caller can't override `/tmp` out-dir, skip
+  the index step on a warm cache, or narrow to a subset of
+  subcommands. Upgrade path: add flags only when a real ask lands
+  (candidates: `--out-dir`, `--skip-index`, `--only`). Speculative
+  scaffolding stays out.
 
 ### Tier 3 — mid & mid-large bench (`--features bench-large`, nightly)
 
