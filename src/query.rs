@@ -171,7 +171,12 @@ pub fn age(cache: &Cache, filters: &Filters) -> Result<Table> {
 }
 
 /// Churn per module | lang | author over the whole cache (bucketed).
-pub fn churn(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
+///
+/// `depth` controls path-segment granularity for `--by module`:
+/// `1` = first segment (`src`), `2` = first two (`src/nvim`), etc.
+/// A file with fewer segments than `depth` groups under its full path.
+/// Ignored for other `by` axes.
+pub fn churn(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result<Table> {
     let filter = filters.commit_where();
     let path_filter = filters.path_where("fc.path");
     let lang_filter = filters.lang_where("fs.language");
@@ -179,10 +184,10 @@ pub fn churn(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
 
     let sql = match by {
         "module" => format!(
-            "SELECT c.bucket_key                                    AS bucket,
-                    split_part(fc.path, '/', 1)                     AS module,
-                    SUM(fc.added)                                   AS added,
-                    SUM(fc.deleted)                                 AS deleted
+            "SELECT c.bucket_key                                              AS bucket,
+                    array_to_string(list_slice(string_split(fc.path, '/'), 1, {depth}), '/') AS module,
+                    SUM(fc.added)                                             AS added,
+                    SUM(fc.deleted)                                           AS deleted
              FROM   file_churn fc
              JOIN   commits    c ON c.sha = fc.sha
              {join}

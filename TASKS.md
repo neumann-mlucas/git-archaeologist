@@ -217,9 +217,13 @@ Tier 3 nightly / manual.
       `survival`).
 - [x] Round-trip: `index && export parquet <dir>` writes all 12 tables
       (including `line_births`).
-- [ ] Byte-exact goldens + `xtask/regenerate-goldens` — deferred.
-      Timestamps + DuckDB output formatting drift; invariant tests catch
-      regressions with less maintenance cost.
+- [x] Byte-exact goldens via parquet + DuckDB `EXCEPT` set-diff
+      (`tests/goldens/*.parquet`, 12 tables, ~26 KB). Regen with
+      `REGEN_GOLDENS=1 cargo test --test golden tier1_golden_integration`.
+      Skipped xtask crate — env-var branch inside the same test does the
+      job in ~10 lines. Set-diff dodges parquet footer + row-order drift;
+      fixture already pins every author/committer date so SHAs + author
+      ids are stable.
 
 ### Tier 2 — small public repo smoke (`--features e2e`) ✅
 
@@ -383,8 +387,11 @@ reasoning.
 - Slice 7 ownership wizard.
 - `Lens` / `View` / `GroupBy` enums — replaced by CLI subcommands + `--by`.
 - `--exclude` flag / `default_exclude` config — `sql WHERE` covers it.
-- `--module-depth` flag / `default_module_depth` — module = first path
-  segment, no knob.
+- ~~`--module-depth` flag / `default_module_depth` — module = first
+  path segment, no knob.~~ **Un-killed.** Real-world use (neovim,
+  40 k commits) showed first-segment grouping hides the story: `src`,
+  `runtime`, `test` are each too broad. Reversed as `churn --depth N`
+  (default 1); flag only, no config default.
 - Bundled DuckDB compile path — `cargo dist` prebuilt binaries instead.
 - 19-grammar-then-shrink cycle — v1 now ships 20 grammars built in
   (SPEC §Language stack); Phase 0's 7-grammar interim is history.

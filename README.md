@@ -138,7 +138,10 @@ codebase with a thin recent skin.
 ### `churn`
 
 Added / deleted per group per bucket. `--by module | lang | author`.
-Sparklines below show weekly net-churn magnitude for the top-4 modules:
+When `--by module`, `--depth N` (default `1`) controls path-segment
+granularity — `1` = top-level dir, `2` = one level deeper, and so on.
+
+`--by module --depth 1`:
 
 ```
 src          ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁  +896,256  -796,079
@@ -147,9 +150,20 @@ test         ▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▂▁▁▁▁�
 third-party  ▁▂▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▂▁▁▁▁▁▁▄▁▁▁▁▁▁▁▁▄▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  +118,919  -184,243
 ```
 
-`src` is roughly balanced (nearly as many deletions as additions over
-12 years), `runtime` and `test` are net-positive (growing), and
-`third-party` is net-negative (a vendored-code removal).
+Same query at `--depth 2` — the story sharpens: `src/nvim` is the C
+core, `test/functional` is where the Lua-migration test churn lives,
+and `src/po` was a one-shot i18n import in the early weeks.
+
+```
+src/nvim         ▁▁▁▁▂▁▁█▆▁▁▃▁▁▂▆▂▁▁▁▁▂▂▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▁▁▁▂▅▃▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁ +1,212,341  -955,535
+test/functional  ▁▁▁▁▃▁▁▁█▁▁▆▁▄▁▃▁▁▁▂▁▁▁▁▃▁▂▁▁▁▁▁▁▁▁▁▁▁▁▂▁▃▄▁▁▁▁▁▃▃▁▂▂▂▂▁▂▁▂▂   +490,894  -211,383
+runtime/doc      ▁▁▁▁▁▁▂▁▆▁▁▂▁▁█▃▁▁▅▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▁▁▁▂▁▁▂▁▁▁▁▁▁▂▄▂▃▁▁▁▂   +322,074  -178,099
+runtime/syntax   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   +220,002   -61,600
+src/po           █▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   +232,931    -4,885
+```
+
+Files with fewer than `depth` segments group under their full path
+(root-level files stay as-is).
 
 ### `classify`
 
@@ -234,6 +248,8 @@ Subcommand-specific:
 - `survival --fit exp` — half-life scalar; returns NULL + `reason`
   column when < 100 deletion events.
 - `hotspot --top N --lang L` — `--lang` required.
+- `churn --depth N` (default 1) — path-segment granularity for
+  `--by module`.
 
 ## Recipes
 

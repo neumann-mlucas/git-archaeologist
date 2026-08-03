@@ -89,7 +89,15 @@ enum Cmd {
     /// File age histogram.
     Age(QueryArgs),
     /// Churn per module / lang / author.
-    Churn(QueryArgs),
+    Churn {
+        #[command(flatten)]
+        q: QueryArgs,
+        /// Path-segment depth for `--by module`. `1` = top-level dir
+        /// (`src`, `runtime`), `2` = one level deeper (`src/nvim`,
+        /// `runtime/lua`). Ignored for other `--by` axes.
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -225,11 +233,14 @@ fn main() -> Result<()> {
             let table = query::age(&cache, &filters)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
-        Cmd::Churn(q) => {
+        Cmd::Churn { q, depth } => {
             ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;
+            if depth == 0 {
+                bail!("--depth must be >= 1");
+            }
             let by = q.by.clone().unwrap_or_else(|| "module".to_string());
             let filters = build_filters(&q)?;
-            let table = query::churn(&cache, &filters, &by)?;
+            let table = query::churn(&cache, &filters, &by, depth)?;
             render_table(&table, FormatArg::resolve(q.format))
         }
         Cmd::Coupling {
