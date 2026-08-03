@@ -285,38 +285,72 @@ If you want an ad-hoc extraction not covered by the dumps, run `git-archaeologis
 
 ## ASCII plots
 
-Every time-series or ranked-bar table gets a fenced-code ASCII chart
-alongside it. No external tools required — a stdlib python one-liner does
-it. Use these three shapes:
-
-**Sparkline** (one-line trend, best for LOC-over-time, commits-per-year):
+**Preferred: milestone-year tables.** Pick 4-7 years across the repo's
+span (e.g. 2014, 2016, 2018, 2020, 2022, 2024, 2026) and print one
+column per group. Renders identically in every markdown viewer, holds
+exact numbers, no glyphs to break on mobile or in non-monospace
+contexts.
 
 ```bash
-python3 -c 'import sys; s="▁▂▃▄▅▆▇█"; xs=[float(l.split()[-1]) for l in sys.stdin if l.strip()]; lo,hi=min(xs),max(xs); r=(hi-lo)or 1; print("".join(s[min(7,int((x-lo)/r*7))] for x in xs))' < data.txt
-````
+# Milestone-year snapshot from any bucket-keyed TSV
+python3 -c '
+from collections import defaultdict
+years = ["2014","2016","2018","2020","2022","2024","2026"]
+by_bkt = defaultdict(dict)
+for l in open("burndown-lang.tsv").readlines()[1:]:
+    b, k, v = l.rstrip().split("\t")
+    by_bkt[int(b)][k] = int(v)
+last_of = {}
+for b in sorted(by_bkt): last_of[str(b)[:4]] = b
+top = sorted(by_bkt[max(by_bkt)], key=lambda k:-by_bkt[max(by_bkt)][k])[:5]
+print(f"{\"year\":<6}" + "".join(f"{k:>14}" for k in top))
+for y in years:
+    if y not in last_of: continue
+    r = by_bkt[last_of[y]]
+    print(f"{y:<6}" + "".join(f"{r.get(k,0):>14,}" for k in top))'
+```
 
-**Horizontal bars** (ranked list, best for top-N authors, module churn,
-cohort survival by year):
+**Horizontal bars** (ranked, no time axis — cohort survival by year,
+top-N authors, age tiers):
 
 ```bash
 python3 -c 'import sys; rows=[l.rstrip().split("\t") for l in sys.stdin if l.strip()]; m=max(float(r[-1]) for r in rows); [print(f"{r[0]:<18} {"█"*int(float(r[-1])/m*40):<40} {r[-1]}") for r in rows]' < top.tsv
 ```
 
-**Vertical histogram** (age distribution, buckets-per-cohort): 7 rows,
-each cell is a `#` or blank. Only worth including when you have ≥15 bins.
+**Sparklines** are a fallback only — when a milestone table would
+be too sparse (< 4 milestone hits) or the story is a shape that only
+survives at high resolution (dead-period detector). Braille glyphs
+render inconsistently in editors and mobile viewers, so default to
+the table.
 
 Rules for plots in the report:
 
 - Wrap in `` ```text `` fences so tables stay left-aligned.
-- One plot per section max. Charts are a caption for the number, not the
-  headline.
-- Skip when N < 5 data points — bars need range to be readable.
-- Always precede with the exact command that produced them (so the user
-  can re-run against updated data).
-- The plot-worthy set: cohort survival by year, module churn totals,
-  contributor net-lines, LOC-burndown, commit-cadence-by-month,
-  file-age histogram (`age.tsv`), and per-language burndown when a
-  crossover exists. Everything else, the table is enough.
+- One plot per section max. Charts are a caption for the number, not
+  the headline.
+- Skip when N < 4 milestone rows — a table with two rows says nothing
+  the sentence beside it couldn't.
+- Always precede with the exact command that produced them (so the
+  user can re-run against updated data).
+- The plot-worthy set: cohort survival by year (bars), module churn
+  net + magnitude per year at depth 1 AND depth 2 (milestone table),
+  contributor net-lines top-10 (bars), LOC-burndown per top-5 lang
+  (milestone table), file-age histogram (bars), commit cadence when
+  spikes exist (milestone table of commits/year).
+
+## Reach for `sql`
+
+The 13 canned dumps cover 90% of questions. Anything else (function
+authored by whom, files added by cohort X still on disk, revert
+patterns per module, etc.) goes through the raw `sql` subcommand:
+
+```bash
+git-archaeologist --repo "$REPO" sql "<query>" --format tsv
+```
+
+Schema is documented at the end of this file (§SQL extractions). Do
+not paste made-up SQL — verify column names against the schema
+section first, then run.
 
 ## Commit cadence (how to compute)
 
@@ -359,3 +393,4 @@ Trigger examples:
 - `/git-arch-analyze /path/to/repo` → analyze that repo
 - `/git-arch-analyze --report /tmp/report.md` → write report elsewhere
   (default is `<repo>/ARCHAEOLOGY.md`)
+````
