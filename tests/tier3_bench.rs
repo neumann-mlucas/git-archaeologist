@@ -81,7 +81,10 @@ impl Report {
         for (label, e) in &self.queries {
             eprintln!("  {:<12}  {:>7.0}ms", label, e.as_secs_f64() * 1000.0);
         }
-        eprintln!("  peak RSS      {:>8.0} MB", self.peak_rss_kb as f64 / 1024.0);
+        eprintln!(
+            "  peak RSS      {:>8.0} MB",
+            self.peak_rss_kb as f64 / 1024.0
+        );
     }
 }
 
@@ -123,13 +126,30 @@ fn run_one(fx: &Fixture) -> Option<Report> {
     );
 
     let queries: Vec<(&str, Vec<&str>)> = vec![
-        ("burndown-lang", vec!["burndown", "--by", "language", "--format", "tsv"]),
-        ("burndown-auth", vec!["burndown", "--by", "author", "--format", "tsv"]),
+        (
+            "burndown-lang",
+            vec!["burndown", "--by", "language", "--format", "tsv"],
+        ),
+        (
+            "burndown-auth",
+            vec!["burndown", "--by", "author", "--format", "tsv"],
+        ),
         ("classify", vec!["classify", "--format", "tsv"]),
-        ("churn-module", vec!["churn", "--by", "module", "--format", "tsv"]),
+        (
+            "churn-module",
+            vec!["churn", "--by", "module", "--format", "tsv"],
+        ),
         ("age", vec!["age", "--format", "tsv"]),
-        ("coupling", vec!["coupling", "--top", "10", "--format", "tsv"]),
-        ("hotspot", vec!["hotspot", "--lang", "rust", "--top", "10", "--format", "tsv"]),
+        (
+            "coupling",
+            vec!["coupling", "--top", "10", "--format", "tsv"],
+        ),
+        (
+            "hotspot",
+            vec![
+                "hotspot", "--lang", "rust", "--top", "10", "--format", "tsv",
+            ],
+        ),
         ("cohort", vec!["cohort", "--format", "tsv"]),
         ("survival", vec!["survival", "--format", "tsv"]),
     ];

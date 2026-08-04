@@ -569,7 +569,11 @@ fn tier1_golden_integration() {
             let dst = goldens_dir.join(format!("{table}.parquet"));
             std::fs::copy(&src, &dst).unwrap();
         }
-        eprintln!("regenerated {} goldens at {}", TABLES.len(), goldens_dir.display());
+        eprintln!(
+            "regenerated {} goldens at {}",
+            TABLES.len(),
+            goldens_dir.display()
+        );
         return;
     }
     assert!(
@@ -602,7 +606,8 @@ fn tier1_golden_integration() {
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or_else(|| panic!("could not parse diff count for {table}: {out:?}"));
         assert_eq!(
-            diff, 0,
+            diff,
+            0,
             "{table} drift: {diff} row(s) differ\n  new:    {}\n  golden: {}",
             new_p.display(),
             gold_p.display()
