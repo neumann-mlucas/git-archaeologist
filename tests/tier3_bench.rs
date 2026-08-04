@@ -172,7 +172,12 @@ fn tier3_bench_all_fixtures() {
     }
 
     let fixtures = common::load_fixtures();
-    let skip_large = std::env::var("TIER3_SKIP_LARGE").is_ok();
+    // Treat empty/"0" as unset — GitHub Actions `env:` sets vars to
+    // empty string even when the workflow input is false/omitted.
+    let skip_large = std::env::var("TIER3_SKIP_LARGE")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .is_some();
     let mut reports = Vec::new();
 
     for fx in &fixtures {
