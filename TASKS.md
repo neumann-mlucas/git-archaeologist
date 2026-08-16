@@ -345,6 +345,41 @@ the upgrade.
   (candidates: `--out-dir`, `--skip-index`, `--only`). Speculative
   scaffolding stays out.
 
+**Closed:**
+
+- ~~`tests/golden.rs:591` — sql-path EXCEPT diff; no per-column
+  reporter.~~ Closed: on non-zero drift, `report_drift()` dumps up to
+  10 differing rows from each side (new-not-in-golden, golden-not-in-new)
+  as formatted tables inside the panic message. Regression now localizes
+  to the exact row and column without opening parquet by hand.
+
+### Tier 1.x — scenario tests (DSL-driven synthetic repos)
+
+Complements the Tier 1 catch-all fixture with narrow, invariant-per-test
+scenarios. Each test builds a small hand-crafted commit sequence via the
+shared DSL (`tests/common/dsl.rs`) and asserts one indexer / fold
+invariant exactly.
+
+- [x] `tests/common/dsl.rs` — `Action` enum (`Commit`, `Rename`,
+      `Delete`) + `build(dir, &actions)`. Derives email from author
+      name; deterministic dates → stable SHAs. Extend the enum
+      (Branch/Merge/Tag) when a new scenario needs it — YAGNI today.
+- [x] `tests/scenarios.rs` — `scenario_rename_chain` (a→b→c, asserts
+      final canonical + rename link count), `scenario_cohort_survival`
+      (controlled birth/death, asserts exact surviving cohort + line
+      count). Add new `scenario_*` fns here as regressions land.
+- [ ] `scenario_trailer_edge` — unicode names, quoted commas,
+      `Signed-off-by:` chains. Add when a trailer bug surfaces.
+- [ ] `scenario_classify_edge` — malformed subjects, git-generated
+      `Revert "…"`. Add when a classify bug surfaces.
+- [ ] Property tests (`proptest`) on the fold: random commit sequences,
+      assert (Σ hunk_new − Σ hunk_del) = final_LOC per file; cohort
+      `born = alive + dead` per bucket. Post-v1 (already in "Possible
+      improvements → Meta"); tier 1.x DSL is the reusable half.
+- [ ] Human-readable TSV goldens alongside parquet, for reviewer-friendly
+      PR diffs on intentional golden changes. Trigger: first golden
+      regen where the parquet-file diff obscures a meaningful change.
+
 ### Tier 3 — mid & mid-large bench (`--features bench-large`, nightly)
 
 - [x] Cargo feature `bench-large` gates the module.

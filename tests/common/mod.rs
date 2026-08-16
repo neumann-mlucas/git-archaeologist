@@ -1,7 +1,13 @@
-//! Shared fixture loader for Tier 2 (`e2e`) and Tier 3 (`bench-large`).
-//! `benches/fixtures.toml` is the single source of truth for pinned repos.
+//! Shared helpers for integration tests.
+//!
+//! - `dsl`: scenario DSL for synthetic fixtures (Tier 1.x scenario tests).
+//! - Everything else: fixture loader for Tier 2 (`e2e`) and Tier 3
+//!   (`bench-large`); `benches/fixtures.toml` is the pinned-repo source
+//!   of truth.
 
 #![allow(dead_code)] // Each test binary uses a subset of these helpers.
+
+pub mod dsl;
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};

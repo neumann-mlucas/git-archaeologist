@@ -588,8 +588,6 @@ fn tier1_golden_integration() {
             "missing golden {} — run: REGEN_GOLDENS=1 cargo test --test golden tier1_golden_integration",
             gold_p.display()
         );
-        // ponytail: sql-path EXCEPT diff; upgrade to per-column reporter
-        // if a real regression is hard to localize from row-count alone.
         let q = format!(
             "SELECT COUNT(*)::BIGINT AS n FROM (\
                (SELECT * FROM read_parquet('{g}') EXCEPT SELECT * FROM read_parquet('{n}'))\
@@ -605,12 +603,40 @@ fn tier1_golden_integration() {
             .nth(1)
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or_else(|| panic!("could not parse diff count for {table}: {out:?}"));
-        assert_eq!(
-            diff,
-            0,
-            "{table} drift: {diff} row(s) differ\n  new:    {}\n  golden: {}",
-            new_p.display(),
-            gold_p.display()
-        );
+        if diff != 0 {
+            let report = report_drift(&fx, table, &gold_p, &new_p);
+            panic!(
+                "{table} drift: {diff} row(s) differ\n  new:    {}\n  golden: {}\n\n{report}",
+                new_p.display(),
+                gold_p.display(),
+            );
+        }
     }
+}
+
+/// On golden drift, dump up to 10 differing rows from each side so the
+/// failure message localizes the regression. Two separate `sql` calls —
+/// each side rendered as a table so column values line up per row.
+fn report_drift(fx: &Fixture, table: &str, gold_p: &Path, new_p: &Path) -> String {
+    let g = gold_p.display();
+    let n = new_p.display();
+    let new_only = fx.arch_stdout(&[
+        "sql",
+        &format!(
+            "SELECT * FROM (SELECT * FROM read_parquet('{n}') EXCEPT SELECT * FROM read_parquet('{g}')) LIMIT 10"
+        ),
+        "--format",
+        "table",
+    ]);
+    let gold_only = fx.arch_stdout(&[
+        "sql",
+        &format!(
+            "SELECT * FROM (SELECT * FROM read_parquet('{g}') EXCEPT SELECT * FROM read_parquet('{n}')) LIMIT 10"
+        ),
+        "--format",
+        "table",
+    ]);
+    format!(
+        "table `{table}` — new rows not in golden (up to 10):\n{new_only}\ngolden rows not in new (up to 10):\n{gold_only}"
+    )
 }
