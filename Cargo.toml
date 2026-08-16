@@ -8,7 +8,7 @@ repository = "https://github.com/neumann-mlucas/git-archaeologist"
 homepage = "https://github.com/neumann-mlucas/git-archaeologist"
 readme = "README.md"
 rust-version = "1.85"
-keywords = ["git", "analytics", "cohort", "duckdb", "cli"]
+keywords = ["git", "code-metrics", "cohort", "churn", "duckdb"]
 categories = ["command-line-utilities", "development-tools"]
 authors = ["neumann-mlucas <neumann.m.lucas@gmail.com>"]
 
