@@ -23,6 +23,10 @@ pub struct FuncDef {
     /// 1-based line numbers, inclusive.
     pub start_line: u32,
     pub end_line: u32,
+    /// xxh64 of the function body normalized (whitespace-collapsed,
+    /// blank-lines dropped, comments retained). Stable across formatting
+    /// churn; distinct value per real body rewrite.
+    pub body_hash: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -609,12 +613,52 @@ fn build_def(source: &[u8], node: Node, spec: &LangSpec, is_method: bool) -> Opt
         kind = "test".to_string();
     }
 
+    let body = source
+        .get(node.start_byte()..node.end_byte())
+        .unwrap_or(&[]);
+    let body_hash = hash_body_normalized(body);
+
     Some(FuncDef {
         name,
         kind,
         start_line,
         end_line,
+        body_hash,
     })
+}
+
+/// xxh64 of the body with whitespace runs collapsed to single spaces per
+/// line, trailing whitespace trimmed, and blank lines dropped. Comments are
+/// kept (doc drift belongs in the comment-density lens, not here).
+fn hash_body_normalized(body: &[u8]) -> u64 {
+    use xxhash_rust::xxh64::Xxh64;
+
+    let mut h = Xxh64::new(0);
+    let mut line_buf: Vec<u8> = Vec::with_capacity(128);
+
+    for line in body.split(|&b| b == b'\n') {
+        line_buf.clear();
+        let mut prev_ws = true;
+        for &b in line {
+            if b.is_ascii_whitespace() {
+                if !prev_ws {
+                    line_buf.push(b' ');
+                    prev_ws = true;
+                }
+            } else {
+                line_buf.push(b);
+                prev_ws = false;
+            }
+        }
+        while line_buf.last() == Some(&b' ') {
+            line_buf.pop();
+        }
+        if !line_buf.is_empty() {
+            h.update(&line_buf);
+            h.update(b"\n");
+        }
+    }
+    h.digest()
 }
 
 fn ancestor_matches(node: Node, kinds: &[&str]) -> bool {
@@ -1076,5 +1120,32 @@ class C {
         // Just check the helper; the snapshot integration is covered by
         // index::tests::smoke_index_tiny_repo via funcs table.
         assert!(is_test_path("tests/mod.rs"));
+    }
+
+    #[test]
+    fn body_hash_is_whitespace_insensitive() {
+        let a = b"fn f() {\n    let x = 1;\n    x + 2\n}";
+        let b = b"fn f() {\n\tlet   x   =   1;\n    x + 2\n}\n";
+        let c = b"fn f() {\n\n\n    let x = 1;\n    x + 2\n}\n";
+        assert_eq!(hash_body_normalized(a), hash_body_normalized(b));
+        assert_eq!(hash_body_normalized(a), hash_body_normalized(c));
+    }
+
+    #[test]
+    fn body_hash_differs_on_logic_change() {
+        let a = b"fn f() { x + 1 }";
+        let b = b"fn f() { x + 2 }";
+        assert_ne!(hash_body_normalized(a), hash_body_normalized(b));
+    }
+
+    #[test]
+    fn body_hash_detects_comment_edit() {
+        // Comments are retained in the hash — doc drift belongs to the
+        // comment-density lens, but a rewrite that only edits comments still
+        // shows as distinct here. Alternative (strip comments) would hide
+        // AI-era comment inflation from func_longevity entirely.
+        let a = b"// old\nfn f() { 1 }";
+        let b = b"// new\nfn f() { 1 }";
+        assert_ne!(hash_body_normalized(a), hash_body_normalized(b));
     }
 }

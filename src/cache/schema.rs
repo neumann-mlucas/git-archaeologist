@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS author_aliases (
     PRIMARY KEY (raw_name, raw_email)
 );
 
+-- NOTE: SCHEMA_VERSION intentionally not bumped when `message` / `body_hash`
+-- were added. Existing caches lacking these columns will error on next open;
+-- run `git-archaeologist reindex` (or delete the cache dir) to rebuild.
 CREATE TABLE IF NOT EXISTS commits (
     sha           TEXT PRIMARY KEY,
     author_id     BIGINT NOT NULL,
@@ -36,7 +39,8 @@ CREATE TABLE IF NOT EXISTS commits (
     msg_type      TEXT,
     is_breaking   BOOLEAN NOT NULL,
     is_revert     BOOLEAN NOT NULL,
-    ignored_blame BOOLEAN NOT NULL
+    ignored_blame BOOLEAN NOT NULL,
+    message       TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_commits_ts     ON commits(authored_at);
 CREATE INDEX IF NOT EXISTS idx_commits_bucket ON commits(bucket_key);
@@ -102,6 +106,7 @@ CREATE TABLE IF NOT EXISTS funcs (
     kind       TEXT    NOT NULL,
     start_line INTEGER NOT NULL,
     end_line   INTEGER NOT NULL,
+    body_hash  BIGINT  NOT NULL,
     PRIMARY KEY (sha, path, name, start_line)
 );
 CREATE INDEX IF NOT EXISTS idx_funcs_path ON funcs(path);

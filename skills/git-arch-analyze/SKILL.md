@@ -62,6 +62,7 @@ The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 | `_comment_density.tsv`| per-(bucket, language) `code`, `comments`, `blanks`, `comment_ratio = comments/(code+comments)`                                                                                                                     |
 | `_subtree_ownership.tsv` | per top-level dir: `head_files`, `single_owner_files` (>80% share), `avg_top_share`, `total_line_births`. Subtree bus-factor rollup                                                                              |
 | `_cross_module_pairs.tsv` | file pairs from different top-level dirs, co-committed ≥3× in commits touching <50 files. Leaky-boundary detector                                                                                                |
+| `_func_longevity.tsv` | per (path, name): `first_bucket`, `last_bucket`, `snapshots`, `rewrites` (distinct `funcs.body_hash` count), `min_len`/`max_len`, `alive_at_head`. Top 200 by rewrite count. Cursed-core / fossil-API detector      |
 
 Read each with `Read` — TSVs, so first line is headers. For big tables (>200 rows), read the head + tail rather than the whole file.
 
@@ -275,10 +276,17 @@ Trigger: ≥3 top-level dirs each holding ≥5% of HEAD LOC (or ≥3 subtrees in
 
 Trigger: `_ai_trailers.tsv` non-empty AND ≥10 AI-tagged commits total. Or repo spans across 2023-01-01 even without trailers (adoption can be silent).
 
-- **AI adoption curve** — `_ai_trailers.tsv` cumulative `ai_commits` per bucket. First bucket with non-zero rows = adoption start. Ratio of AI-tagged commits to total commits in last 90d = current mix.
+- **AI adoption curve (trailer path)** — `_ai_trailers.tsv` cumulative `ai_commits` per bucket. First bucket with non-zero rows = adoption start. Ratio of AI-tagged commits to total commits in last 90d = current mix.
+- **AI mention path** — some commits mention AI in the message body without a trailer. `commits.message` is in the schema — union with trailers for the full picture:
+  ```bash
+  git-archaeologist --repo "$REPO" sql "SELECT bucket_key, COUNT(*) AS mentions
+    FROM commits WHERE regexp_matches(lower(message), '(claude|copilot|chatgpt|cursor|codex|aider)')
+    GROUP BY bucket_key ORDER BY bucket_key" --format tsv
+  ```
 - **Cohort survival split** — post-adoption birth-buckets from `cohort.tsv` / `survival.tsv` at matched age vs pre-adoption cohorts. Faster decay = AI output revised more (correlation, not causation).
 - **Comment-density shift** — `_comment_density.tsv` `comment_ratio` per language across the adoption boundary. AI often inflates comment density; call the delta.
 - **Commit-size shift** — median LOC/commit pre vs post-adoption via `sql` over `file_churn`. Rising size + rising reverts = "AI drafts, humans miss bugs".
+- **Function rewrite bursts** — `_func_longevity.tsv` `rewrites` per function post-adoption. Cursed-core hotspots that keep getting AI-rewritten point at churn-prone areas.
 - So-what: is AI adoption visible in the churn/comment/survival curves? Name the bucket it started, name what changed — or "adoption present but no measurable shift" if flat.
 
 ### Human patterns
@@ -290,6 +298,18 @@ Trigger: `_off_hours.tsv` has ≥5 rows (dump filters authors with <20 commits).
 - **Weekend ratio** separately from `weekend_ratio_utc` — weekend-heavy but 9-18 within = "works weekends but daytime" (side project); weekend-light but off-hours = "shifts start early/end late" (different tz).
 - **Tenure distribution** — from `_authors.tsv`, histogram of `active_days` per author (bucket <30 / 30-180 / 180d-1y / 1-3y / 3y+). Fat short-tenure bucket = drive-by contribs; fat long-tail = stable core.
 - So-what: name any author >40% off-hours; name the team's working-hours regime; connect dormant-author flags from Contributors section.
+
+### Function longevity
+
+Trigger: `_func_longevity.tsv` non-empty (tree-sitter parsed at least one snapshot).
+
+- **Cursed core** — top rows by `rewrites` where `alive_at_head=true` AND `snapshots >= 10`. Same function, many bodies, still shipping. Name 3-5. These are load-bearing legacy where every change lands.
+- **Rewrite treadmill** — `rewrites / snapshots > 0.3` = body cycled every ~3 snapshots. Design instability.
+- **Fossil API** — `alive_at_head=true` AND `rewrites <= 1` AND `snapshots > 20`. Written once, never touched, still exported. Either stable primitive or dead public surface.
+- **Fast burners** — `alive_at_head=false` AND `snapshots >= 5` AND `rewrites >= 3`. Born, churned, killed. Design failures worth naming (what was tried, what replaced it).
+- **Bloat drift** — `max_len / min_len > 3`. Function grew unbounded. Refactor candidates.
+- Cross-reference the top-3 cursed-core functions against `hotspot-<lang>.tsv` — they should agree. If a function is high-churn in `_func_longevity` but absent from hotspot table, the file itself is churn-heavy while the function is stable (surrounding code moves around it).
+- So-what: name the top cursed-core function; name any rewrite-treadmill instability; name a dead fast-burner if the story explains a design pivot.
 
 ### Composition trend
 

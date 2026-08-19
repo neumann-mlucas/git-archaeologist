@@ -54,6 +54,9 @@ duckdb = "1"
 
 rayon = "1"
 
+# body_hash on funcs — xxh64 is stable across xxhash-rust versions.
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
 # Direct dep (also transitive via gix) so we can build a custom Sink over blob pairs.
 imara-diff = "0.1"
 

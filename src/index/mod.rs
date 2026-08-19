@@ -209,6 +209,7 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
                 commit.conv.is_breaking,
                 commit.conv.is_revert,
                 commit.ignored_blame,
+                commit.message,
             ])?;
 
             for (idx, parent) in commit.parents.iter().enumerate() {
@@ -256,6 +257,7 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
                                 def.kind,
                                 def.start_line,
                                 def.end_line,
+                                def.body_hash as i64,
                             ])?;
                         }
                     }

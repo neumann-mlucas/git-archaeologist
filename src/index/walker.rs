@@ -21,6 +21,7 @@ pub struct CommitInfo {
     pub conv: ConvCommit,
     pub trailers: Vec<Trailer>,
     pub ignored_blame: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,7 @@ pub fn walk(repo: &Repo, ignore_revs: &HashSet<String>) -> Result<Vec<CommitInfo
             conv: parse_conv_commit(&msg),
             trailers: parse_trailers(&msg),
             ignored_blame,
+            message: msg.into_owned(),
         });
     }
 

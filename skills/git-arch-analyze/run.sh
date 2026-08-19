@@ -276,6 +276,47 @@ FROM file_top
 GROUP BY subtree
 ORDER BY head_files DESC"
 
+log "→ _func_longevity (per-function birth, span, rewrite count via body_hash)"
+# One row per (path, name, kind) that has ever appeared. Distinct body_hash
+# count = number of rewrites. Kind is taken from the latest snapshot in case
+# a function was reclassified (fn → test after a #[test] attr was added).
+sql_dump _func_longevity "WITH snap_bounds AS (
+  SELECT f.path, f.name,
+         MIN(c.bucket_key) AS first_bucket,
+         MAX(c.bucket_key) AS last_bucket,
+         COUNT(DISTINCT c.sha) AS snapshots,
+         COUNT(DISTINCT f.body_hash) AS distinct_bodies,
+         MAX(f.end_line - f.start_line + 1) AS max_len,
+         MIN(f.end_line - f.start_line + 1) AS min_len
+  FROM funcs f
+  JOIN commits c ON c.sha = f.sha
+  WHERE c.is_sampled
+  GROUP BY f.path, f.name
+), latest_kind AS (
+  SELECT f.path, f.name, ANY_VALUE(f.kind) AS kind
+  FROM funcs f
+  JOIN commits c ON c.sha = f.sha
+  WHERE c.is_sampled
+    AND c.bucket_key = (
+      SELECT MAX(c2.bucket_key) FROM funcs f2 JOIN commits c2 ON c2.sha = f2.sha
+      WHERE f2.path = f.path AND f2.name = f.name AND c2.is_sampled
+    )
+  GROUP BY f.path, f.name
+), current_head AS (
+  SELECT DISTINCT f.path, f.name FROM funcs f
+  WHERE f.sha = (SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1)
+)
+SELECT sb.path, sb.name, lk.kind,
+       sb.first_bucket, sb.last_bucket, sb.snapshots,
+       sb.distinct_bodies AS rewrites,
+       sb.min_len, sb.max_len,
+       CASE WHEN ch.name IS NOT NULL THEN true ELSE false END AS alive_at_head
+FROM snap_bounds sb
+LEFT JOIN latest_kind lk ON lk.path = sb.path AND lk.name = sb.name
+LEFT JOIN current_head ch ON ch.path = sb.path AND ch.name = sb.name
+ORDER BY sb.distinct_bodies DESC, sb.snapshots DESC
+LIMIT 200"
+
 log "→ _cross_module_pairs (cross-subtree file coupling)"
 # Rows in coupling that cross top-level dirs = leaky module boundary.
 # Excludes commits touching >= 50 files (mass renames / vendored drops).
