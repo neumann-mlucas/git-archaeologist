@@ -185,6 +185,118 @@ SELECT
 FROM gaps WHERE prev IS NOT NULL
 GROUP BY gap_bucket ORDER BY n DESC"
 
+log "→ _ai_trailers (per-bucket AI co-authorship, Co-Authored-By trailers)"
+# Matches Claude/Copilot/GPT/Codex/Cursor/Aider by name or email. Trailer
+# role is lowercased at index time (see src/index/parse.rs). AI adoption is
+# broadly post-2023; ignore this dump if the repo has no post-2023 commits.
+sql_dump _ai_trailers "WITH ai AS (
+  SELECT DISTINCT t.sha
+  FROM commit_trailers t JOIN authors a ON a.id = t.author_id
+  WHERE t.role = 'coauthor'
+    AND (a.canonical_name  ILIKE '%claude%'
+      OR a.canonical_name  ILIKE '%copilot%'
+      OR a.canonical_name  ILIKE '%gpt%'
+      OR a.canonical_name  ILIKE '%codex%'
+      OR a.canonical_name  ILIKE '%cursor%'
+      OR a.canonical_name  ILIKE '%aider%'
+      OR a.canonical_email ILIKE '%claude%'
+      OR a.canonical_email ILIKE '%copilot%'
+      OR a.canonical_email ILIKE '%codex%'
+      OR a.canonical_email ILIKE '%aider%')
+)
+SELECT c.bucket_key AS bucket,
+       COUNT(DISTINCT c.sha) AS ai_commits,
+       COUNT(DISTINCT c.author_id) AS ai_human_authors
+FROM commits c JOIN ai ON ai.sha = c.sha
+WHERE NOT c.is_merge
+GROUP BY c.bucket_key ORDER BY c.bucket_key"
+
+log "→ _off_hours (per-author off-hours commit ratio, UTC)"
+# Weekend (dow 0,6) or outside 09:00-18:00 UTC. Git stores author-local time
+# but drops the tz on stringify at some layers; treat this as UTC and note
+# in the report. Sustained >30% for one author = signal (contractor, remote,
+# firefighting, or burnout — do not guess which).
+sql_dump _off_hours "SELECT
+  a.canonical_name AS author,
+  COUNT(*) AS commits,
+  SUM(CASE WHEN EXTRACT(dow FROM to_timestamp(c.authored_at)) IN (0, 6)
+            OR EXTRACT(hour FROM to_timestamp(c.authored_at)) NOT BETWEEN 9 AND 18
+           THEN 1 ELSE 0 END)::DOUBLE / COUNT(*) AS off_hours_ratio_utc,
+  SUM(CASE WHEN EXTRACT(dow FROM to_timestamp(c.authored_at)) IN (0, 6)
+           THEN 1 ELSE 0 END)::DOUBLE / COUNT(*) AS weekend_ratio_utc
+FROM commits c JOIN authors a ON a.id = c.author_id
+WHERE NOT c.is_merge
+GROUP BY a.canonical_name
+HAVING COUNT(*) >= 20
+ORDER BY off_hours_ratio_utc DESC
+LIMIT 30"
+
+log "→ _comment_density (per-bucket per-lang code/comments/blanks)"
+# Rides on file_stats.comments + file_stats.blanks which no built-in
+# subcommand surfaces. Feeds composition-trend + AI-era comment-inflation.
+sql_dump _comment_density "SELECT
+  c.bucket_key AS bucket,
+  fs.language,
+  SUM(fs.code)     AS code,
+  SUM(fs.comments) AS comments,
+  SUM(fs.blanks)   AS blanks,
+  ROUND(SUM(fs.comments)::DOUBLE / NULLIF(SUM(fs.code) + SUM(fs.comments), 0), 3) AS comment_ratio
+FROM file_stats fs JOIN commits c ON c.sha = fs.sha
+WHERE c.is_sampled
+GROUP BY c.bucket_key, fs.language
+HAVING SUM(fs.code) + SUM(fs.comments) > 0
+ORDER BY bucket, code DESC"
+
+log "→ _subtree_ownership (per top-level dir bus-factor rollup)"
+# Repo bus factor 5 can hide subtree bus factor 1. Include when repo has
+# >= 3 substantive top-level dirs (see monorepo lens trigger).
+sql_dump _subtree_ownership "WITH head_paths AS (
+  SELECT DISTINCT path FROM file_stats
+  WHERE sha = (SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1)
+), per_file_owner AS (
+  SELECT lb.path, a.canonical_name AS author, COUNT(*) AS births
+  FROM line_births lb
+  JOIN commits c ON c.sha = lb.birth_sha
+  JOIN authors a ON a.id = c.author_id
+  WHERE lb.path IN (SELECT path FROM head_paths)
+  GROUP BY lb.path, a.canonical_name
+), file_top AS (
+  SELECT path,
+         SUM(births) AS tot_births,
+         MAX(births)::DOUBLE / SUM(births) AS top_share
+  FROM per_file_owner
+  GROUP BY path
+)
+SELECT split_part(path, '/', 1) AS subtree,
+       COUNT(*) AS head_files,
+       SUM(CASE WHEN top_share > 0.8 THEN 1 ELSE 0 END) AS single_owner_files,
+       ROUND(AVG(top_share), 3) AS avg_top_share,
+       SUM(tot_births) AS total_line_births
+FROM file_top
+GROUP BY subtree
+ORDER BY head_files DESC"
+
+log "→ _cross_module_pairs (cross-subtree file coupling)"
+# Rows in coupling that cross top-level dirs = leaky module boundary.
+# Excludes commits touching >= 50 files (mass renames / vendored drops).
+sql_dump _cross_module_pairs "WITH small_commits AS (
+  SELECT sha FROM file_churn GROUP BY sha HAVING COUNT(*) < 50
+), pairs AS (
+  SELECT fa.path AS path_a, fb.path AS path_b, COUNT(*) AS co_commits
+  FROM file_churn fa
+  JOIN file_churn fb ON fa.sha = fb.sha AND fa.path < fb.path
+  JOIN small_commits sc ON sc.sha = fa.sha
+  WHERE split_part(fa.path, '/', 1) != split_part(fb.path, '/', 1)
+  GROUP BY fa.path, fb.path
+  HAVING COUNT(*) >= 3
+)
+SELECT split_part(path_a, '/', 1) AS subtree_a,
+       split_part(path_b, '/', 1) AS subtree_b,
+       path_a, path_b, co_commits
+FROM pairs
+ORDER BY co_commits DESC
+LIMIT 50"
+
 {
   echo "# summary — $REPO_NAME @ $TS"
   echo

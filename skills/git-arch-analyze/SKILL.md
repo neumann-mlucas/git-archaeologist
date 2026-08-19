@@ -4,9 +4,11 @@ description: >
   Run git-archaeologist on a repo and write a narrative markdown report
   interpreting the numbers. Not just "here are the tables" — the report
   reads as an engineering analysis: what's healthy, what's smelly, where
-  the bodies are buried. Trigger: `/git-arch-analyze [path]`,
+  the bodies are buried. Works on any git repo: OSS health, monorepo
+  subsystem drift, team dynamics, AI-era code shifts, composition trends
+  (test/config/code balance). Trigger: `/git-arch-analyze [path]`,
   "analyze this repo with git-archaeologist", "run archaeologist +
-  interpret", "git-arch report".
+  interpret", "git-arch report", "monorepo forensics", "AI-impact scan".
 ---
 
 # git-arch-analyze
@@ -55,6 +57,11 @@ The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 | `_birth_death.tsv`    | born vs died lines per bucket, sorted by died — auto-detects big deletion events                                                                                                                                    |
 | `_longlived.tsv`      | day-1 files still in HEAD, with line counts from the first bucket                                                                                                                                                   |
 | `_tag_gaps.tsv`       | tag inter-arrival distribution (under_1h / under_1d / under_1w / over_1w)                                                                                                                                           |
+| `_ai_trailers.tsv`    | per-bucket AI Co-Authored-By count (Claude/Copilot/GPT/Codex/Cursor/Aider). Empty = no AI co-authorship in repo                                                                                                     |
+| `_off_hours.tsv`      | per-author `off_hours_ratio_utc` (weekend or outside 09-18 UTC) + `weekend_ratio_utc`. Min 20 commits. Timezones lost — treat as UTC                                                                                |
+| `_comment_density.tsv`| per-(bucket, language) `code`, `comments`, `blanks`, `comment_ratio = comments/(code+comments)`                                                                                                                     |
+| `_subtree_ownership.tsv` | per top-level dir: `head_files`, `single_owner_files` (>80% share), `avg_top_share`, `total_line_births`. Subtree bus-factor rollup                                                                              |
+| `_cross_module_pairs.tsv` | file pairs from different top-level dirs, co-committed ≥3× in commits touching <50 files. Leaky-boundary detector                                                                                                |
 
 Read each with `Read` — TSVs, so first line is headers. For big tables (>200 rows), read the head + tail rather than the whole file.
 
@@ -251,6 +258,57 @@ Read the header of `age.tsv` first — column names vary by schema version.
 - Example: "Contributors section says 9 new committers in 30d — check merge latency to test whether backlog is growing" — ties to a real section.
 
 ````
+## Optional lenses
+
+Beyond the core sections above. Each lens has a trigger condition — include when repo shape justifies it, otherwise skip. All lenses use existing dumps + raw `sql` or `git log`; no re-index needed. Same "so what" discipline applies.
+
+### Monorepo subtree health
+
+Trigger: ≥3 top-level dirs each holding ≥5% of HEAD LOC (or ≥3 subtrees in `_subtree_ownership.tsv` with `head_files ≥ 5`).
+
+- **Per-subtree bus factor** — `_subtree_ownership.tsv` directly. Any subtree with `single_owner_files / head_files > 0.5` = silo risk.
+- **Cross-subtree coupling** — `_cross_module_pairs.tsv`. Name the top pair; run `git log --oneline -- <fileA> <fileB> | head -5` for the ripple trail (or state "no ripple trail" if no informative commits).
+- **Per-subtree cadence** — commits/month per top-level dir from `churn-module.tsv`. Dormant subtree next to a hot one = ossifying subsystem, not "the whole repo is healthy".
+- So-what: which subtree carries silo risk; which boundary leaks.
+
+### AI-era shift
+
+Trigger: `_ai_trailers.tsv` non-empty AND ≥10 AI-tagged commits total. Or repo spans across 2023-01-01 even without trailers (adoption can be silent).
+
+- **AI adoption curve** — `_ai_trailers.tsv` cumulative `ai_commits` per bucket. First bucket with non-zero rows = adoption start. Ratio of AI-tagged commits to total commits in last 90d = current mix.
+- **Cohort survival split** — post-adoption birth-buckets from `cohort.tsv` / `survival.tsv` at matched age vs pre-adoption cohorts. Faster decay = AI output revised more (correlation, not causation).
+- **Comment-density shift** — `_comment_density.tsv` `comment_ratio` per language across the adoption boundary. AI often inflates comment density; call the delta.
+- **Commit-size shift** — median LOC/commit pre vs post-adoption via `sql` over `file_churn`. Rising size + rising reverts = "AI drafts, humans miss bugs".
+- So-what: is AI adoption visible in the churn/comment/survival curves? Name the bucket it started, name what changed — or "adoption present but no measurable shift" if flat.
+
+### Human patterns
+
+Trigger: `_off_hours.tsv` has ≥5 rows (dump filters authors with <20 commits).
+
+- **Off-hours ratio** — `_off_hours.tsv` `off_hours_ratio_utc`. Sustained >30% for one author = contractor pattern, timezone-shifted teammate, or firefighting. Do NOT diagnose which — cite the number and let the reader decide.
+- **Timezone caveat** — `authored_at` is normalized without tz preservation in this schema; ratios are UTC-based. A team commuting during Asia business hours will look "off-hours" from a UTC lens. State this in the section header when the top author is >50%.
+- **Weekend ratio** separately from `weekend_ratio_utc` — weekend-heavy but 9-18 within = "works weekends but daytime" (side project); weekend-light but off-hours = "shifts start early/end late" (different tz).
+- **Tenure distribution** — from `_authors.tsv`, histogram of `active_days` per author (bucket <30 / 30-180 / 180d-1y / 1-3y / 3y+). Fat short-tenure bucket = drive-by contribs; fat long-tail = stable core.
+- So-what: name any author >40% off-hours; name the team's working-hours regime; connect dormant-author flags from Contributors section.
+
+### Composition trend
+
+Trigger: always safe. Especially load-bearing for repos where "is this well-tested" or "is this a config platform" matters.
+
+- **Comment density per language over time** — `_comment_density.tsv`. Trend `comment_ratio` per top-3 languages across buckets. Rising = doc culture / AI inflation; falling = code outpacing docs. Compare across languages: Rust/Go idiomatic doc-comments should sit higher than JS/Python inline habits.
+- **Test-file pairing per top-level dir** — path glob at HEAD, count `*_test.*` / `*.test.*` / `test_*` / under `tests?/` vs prod files. Any prod dir with zero tests = red flag.
+- **Config-vs-code ratio** — sum `_comment_density.tsv` `code` where `language IN ('YAML','JSON','TOML','HCL','Dockerfile')` vs everything else. Rising config share past 30% = platform drift (k8s/terraform/pipelines eating the codebase).
+- **Generated-code split** — flag `vendor/`, `node_modules/`, `dist/`, `*.pb.go`, `*_gen.*`, `*_pb2.py`. Report handwritten LOC separately in TL;DR when generated exceeds 20% of HEAD LOC. Cleans every other signal that treats machine output as human work.
+- Recipe (test-file pairing, path-only, no dump needed):
+  ```bash
+  duckdb -c "SELECT split_part(file, '/', 1) AS subtree,
+    SUM(CASE WHEN regexp_matches(file, '(_test\.|\.test\.|/test_|/tests?/|^test_|^tests?/)') THEN 1 ELSE 0 END) AS test_files,
+    SUM(CASE WHEN NOT regexp_matches(file, '(_test\.|\.test\.|/test_|/tests?/|^test_|^tests?/)') THEN 1 ELSE 0 END) AS prod_files
+    FROM read_csv('/dev/stdin', columns={'file':'VARCHAR'}, header=false)
+    GROUP BY subtree ORDER BY prod_files DESC" < <(git -C "$REPO" ls-files)
+  ```
+- So-what: any prod dir with zero tests; any repo where config >30% of LOC (name it as platform, not app); comment-ratio trend direction per language.
+
 ## SQL extractions (design notes)
 
 The `sql` subcommand hits the DuckDB index directly. `run.sh` dumps five extra TSVs that the built-in subcommands don't cover; use them per the section instructions above. Key tables in the schema (v2):
