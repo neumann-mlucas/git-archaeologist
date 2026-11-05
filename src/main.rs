@@ -28,7 +28,7 @@ const TABLES: &[&str] = &[
 ];
 
 #[derive(Parser, Debug)]
-#[command(name = "git-archaeologist", bin_name = "git-arch", version, about)]
+#[command(name = "git-archaeologist", version, about)]
 struct Cli {
     /// Repository path (defaults to current directory).
     #[arg(long = "repo", default_value = ".", global = true)]

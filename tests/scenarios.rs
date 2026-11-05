@@ -363,3 +363,133 @@ fn scenario_path_reused_after_rename() {
         1
     );
 }
+
+fn one_commit(env: &Env, writes: &[(&str, &str)]) {
+    dsl::build(
+        &env.repo,
+        &[Action::commit(
+            "Alice",
+            "2025-01-01T00:00:00Z",
+            "feat: init",
+            writes,
+        )],
+    );
+}
+
+/// The same blob under two extensions gets each path's own language.
+#[test]
+fn scenario_shared_blob_keeps_per_path_language() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("pkg/__init__.py", ""), ("src/mod.rs", "")]);
+    env.arch_stdout(&["index"]);
+    let langs = env.arch_stdout(&[
+        "sql",
+        "SELECT path, language FROM file_stats ORDER BY path",
+        "--format",
+        "tsv",
+    ]);
+    assert_eq!(
+        langs.lines().skip(1).collect::<Vec<_>>(),
+        ["pkg/__init__.py\tPython", "src/mod.rs\tRust"]
+    );
+}
+
+/// `_` in `--path` is a literal, not a LIKE wildcard.
+#[test]
+fn scenario_path_filter_is_literal() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("a_b/x.txt", "1\n"), ("axb/x.txt", "1\n2\n")]);
+    env.arch_stdout(&["index"]);
+    let out = env.arch_stdout(&[
+        "churn", "--by", "module", "--path", "a_b", "--format", "tsv",
+    ]);
+    let modules: Vec<&str> = out
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').nth(1).unwrap())
+        .collect();
+    assert_eq!(modules, ["a_b"]);
+}
+
+/// `reindex` re-canonicalizes authors after an aliases.toml change.
+#[test]
+fn scenario_reindex_applies_new_aliases() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("a.txt", "1\n")]);
+    env.arch_stdout(&["index"]);
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM authors WHERE canonical_name = 'Alice'"),
+        1
+    );
+
+    let cfg = env.xdg_config.join("git-archaeologist");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("aliases.toml"),
+        "[[alias]]\ncanonical_name = \"Alice A.\"\ncanonical_email = \"a@corp\"\n\
+         raw = [{ name = \"Alice\", email = \"alice@example.com\" }]\n",
+    )
+    .unwrap();
+    env.arch_stdout(&["reindex"]);
+
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM authors"),
+        1,
+        "stale author row left"
+    );
+    assert_eq!(
+        env.sql_i64(
+            "SELECT COUNT(*) FROM author_aliases al JOIN authors a ON a.id = al.author_id \
+             WHERE a.canonical_name = 'Alice A.'"
+        ),
+        1,
+        "alias row must point at the new canonical author"
+    );
+}
+
+/// A cache locked by another process is reported, never wiped.
+#[test]
+fn scenario_locked_cache_is_not_wiped() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("a.txt", "1\n")]);
+    env.arch_stdout(&["index"]);
+    let cache = std::fs::read_dir(env.xdg_data.join("git-archaeologist/caches"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("cache.duckdb");
+
+    let holder = duckdb::Connection::open(&cache).unwrap();
+    let out = env.arch(&["sql", "SELECT 1"]);
+    assert!(!out.status.success(), "must refuse a locked cache");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("in use"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    drop(holder);
+
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM commits"),
+        1,
+        "cache was wiped"
+    );
+}

@@ -75,7 +75,7 @@ impl Filters {
         if let Some(a) = &self.author {
             let a = sql_escape(a).to_ascii_lowercase();
             parts.push(format!(
-                "(LOWER(a.canonical_name) LIKE '%{a}%' OR LOWER(a.canonical_email) LIKE '%{a}%')"
+                "(contains(LOWER(a.canonical_name), '{a}') OR contains(LOWER(a.canonical_email), '{a}'))"
             ));
         }
         if parts.is_empty() {
@@ -89,7 +89,8 @@ impl Filters {
         match &self.path_prefix {
             Some(p) => {
                 let p = sql_escape(p);
-                format!(" AND {path_col} LIKE '{p}%'")
+                // starts_with, not LIKE: `_` / `%` in paths are literal.
+                format!(" AND starts_with({path_col}, '{p}')")
             }
             None => String::new(),
         }
@@ -751,8 +752,8 @@ mod tests {
         assert!(w.starts_with(" AND"));
         assert!(w.contains("c.authored_at >="));
         assert!(w.contains("c.authored_at <"));
-        assert!(w.contains("LOWER(a.canonical_name) LIKE '%ada%'"));
-        assert_eq!(f.path_where("fc.path"), " AND fc.path LIKE 'src/%'");
+        assert!(w.contains("contains(LOWER(a.canonical_name), 'ada')"));
+        assert_eq!(f.path_where("fc.path"), " AND starts_with(fc.path, 'src/')");
         assert_eq!(
             f.lang_where("fs.language"),
             " AND LOWER(fs.language) IN ('rust','python')"

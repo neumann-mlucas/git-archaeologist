@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS commits (
     sha           TEXT PRIMARY KEY,
     author_id     BIGINT NOT NULL,
     committer_id  BIGINT NOT NULL,
+    -- Committer time despite the name (closer to "when it landed"; author
+    -- dates survive rebases). Name kept: skill + README SQL depend on it.
     authored_at   BIGINT NOT NULL,
     is_merge      BOOLEAN NOT NULL,
     is_sampled    BOOLEAN NOT NULL,
