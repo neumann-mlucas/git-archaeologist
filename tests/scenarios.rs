@@ -551,6 +551,7 @@ fn scenario_stats_snapshot() {
         &[
             ("src/a.rs", "// c\nfn f() {\n    1;\n}\n\nfn g() {}\n"),
             ("notes.txt", "x\ny\n"),
+            ("tests/b.rs", "fn h() {}\n"),
         ],
     );
     env.arch_stdout(&["index"]);
@@ -563,23 +564,23 @@ fn scenario_stats_snapshot() {
             .map(|l| l.split('\t').map(str::to_string).collect())
             .collect()
     };
-    // group, files, lines, code, comments, blanks, funcs
+    // group, files, lines, code, comments, blanks, test_code, test_pct, funcs
     let lang = rows(&[]);
     let head: Vec<Vec<&str>> = lang
         .iter()
-        .map(|r| r[..7].iter().map(String::as_str).collect())
+        .map(|r| r[..9].iter().map(String::as_str).collect())
         .collect();
     assert_eq!(
         head,
         [
-            vec!["Rust", "1", "6", "4", "1", "1", "2"],
-            vec!["other", "1", "2", "", "", "", "0"],
-            vec!["Total", "2", "8", "4", "1", "1", "2"],
+            vec!["Rust", "2", "7", "5", "1", "1", "1", "20", "3"],
+            vec!["other", "1", "2", "", "", "", "", "", "0"],
+            vec!["Total", "3", "9", "5", "1", "1", "1", "20", "3"],
         ]
     );
     let dirs: Vec<String> = rows(&["--by", "dir"])
         .into_iter()
         .map(|r| r[0].clone())
         .collect();
-    assert_eq!(dirs, ["src", ".", "Total"]);
+    assert_eq!(dirs, ["src", ".", "tests", "Total"]);
 }

@@ -13,6 +13,9 @@ pub struct FileStat {
     pub code: u32,
     pub comments: u32,
     pub blanks: u32,
+    /// Code lines (not comments/blanks) that are test code: whole file for
+    /// a test path, else lines inside syntactic test regions.
+    pub test_code: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -41,21 +44,38 @@ struct CachedParse {
     code: u32,
     comments: u32,
     blanks: u32,
+    /// Code lines inside syntactic test regions (path rule applied later).
+    test_code: u32,
     funcs: Vec<FuncDef>,
 }
 
 const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
+/// Syntactic test-region detector per language. Regions are whole nodes
+/// (attributes/decorators included); everything inside is test code.
 #[derive(Copy, Clone, Debug)]
 enum TestDetect {
-    /// Path-based only. Applies to JS/TS/C/C++.
+    /// Path rules only.
     None,
-    /// Rust — walk preceding siblings of the def for an `attribute_item`
-    /// whose source contains "test", OR check ancestor `mod_item`s for a
-    /// `cfg(test)` attribute.
-    RustAttr,
-    /// Python / Go — `name.starts_with(prefix)`. Case-sensitive.
-    NamePrefix(&'static str),
+    /// `#[cfg(test)]` items, `#[test]` / `#[<x>::test]` / `#[bench]` /
+    /// `#[rstest]` / `#[test_case]` fns.
+    Rust,
+    /// `def test_*`, `class Test*` / `*TestCase` subclasses, pytest
+    /// fixtures.
+    Python,
+    /// `func Test|Benchmark|Fuzz|Example<Upper|_|end>`.
+    Go,
+    /// Top-level `describe/it/test/...(...)` call statements (jest, mocha,
+    /// vitest), incl. `.each/.only/.skip` chains.
+    Js,
+    /// Classes holding a JUnit/TestNG test-annotated method; such methods.
+    Java,
+    /// `def test_*`, minitest/Test::Unit classes, RSpec blocks.
+    Ruby,
+    /// GoogleTest / Catch2 / doctest macros (`TEST`, `TEST_F`, `TEST_CASE`…).
+    Cpp,
+    /// PHPUnit: classes extending `*TestCase`, `test*` methods.
+    Php,
 }
 
 #[derive(Clone)]
@@ -97,7 +117,7 @@ impl LangRegistry {
                 fn_kinds: &["function_item"],
                 method_kinds: &[],
                 method_ancestor_kinds: &["impl_item"],
-                test_detect: TestDetect::RustAttr,
+                test_detect: TestDetect::Rust,
             },
         );
         add(
@@ -109,7 +129,7 @@ impl LangRegistry {
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
                 method_ancestor_kinds: &["class_definition"],
-                test_detect: TestDetect::NamePrefix("test_"),
+                test_detect: TestDetect::Python,
             },
         );
         add(
@@ -121,7 +141,7 @@ impl LangRegistry {
                 fn_kinds: &["function_declaration", "generator_function_declaration"],
                 method_kinds: &["method_definition"],
                 method_ancestor_kinds: &[],
-                test_detect: TestDetect::None,
+                test_detect: TestDetect::Js,
             },
         );
         add(
@@ -137,7 +157,7 @@ impl LangRegistry {
                 ],
                 method_kinds: &["method_definition", "method_signature"],
                 method_ancestor_kinds: &[],
-                test_detect: TestDetect::None,
+                test_detect: TestDetect::Js,
             },
         );
         add(
@@ -153,7 +173,7 @@ impl LangRegistry {
                 ],
                 method_kinds: &["method_definition", "method_signature"],
                 method_ancestor_kinds: &[],
-                test_detect: TestDetect::None,
+                test_detect: TestDetect::Js,
             },
         );
         add(
@@ -165,7 +185,7 @@ impl LangRegistry {
                 fn_kinds: &["function_declaration"],
                 method_kinds: &["method_declaration"],
                 method_ancestor_kinds: &[],
-                test_detect: TestDetect::NamePrefix("Test"),
+                test_detect: TestDetect::Go,
             },
         );
         add(
@@ -189,7 +209,7 @@ impl LangRegistry {
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
                 method_ancestor_kinds: &["class_specifier", "struct_specifier"],
-                test_detect: TestDetect::None,
+                test_detect: TestDetect::Cpp,
             },
         );
         add(
@@ -228,7 +248,7 @@ impl LangRegistry {
                 fn_kinds: &[],
                 method_kinds: &["method_declaration", "constructor_declaration"],
                 method_ancestor_kinds: &["class_declaration"],
-                test_detect: TestDetect::None,
+                test_detect: TestDetect::Java,
             },
         );
         add(
@@ -240,7 +260,7 @@ impl LangRegistry {
                 fn_kinds: &["method"],
                 method_kinds: &[],
                 method_ancestor_kinds: &["class"],
-                test_detect: TestDetect::NamePrefix("test_"),
+                test_detect: TestDetect::Ruby,
             },
         );
         add(
@@ -300,7 +320,7 @@ impl LangRegistry {
                 fn_kinds: &["function_definition"],
                 method_kinds: &["method_declaration"],
                 method_ancestor_kinds: &[],
-                test_detect: TestDetect::None,
+                test_detect: TestDetect::Php,
             },
         );
         add(
@@ -439,7 +459,8 @@ pub fn batch_sampled(repo: &Repo, sampled_shas: &[String]) -> HashMap<String, Ve
                 .filter_map(|(path, oid, label)| {
                     let c = parse_map.get(&(oid, label))?.clone()?;
                     let mut funcs = c.funcs;
-                    if is_test_path(&path) {
+                    let test_path = is_test_path(&path);
+                    if test_path {
                         for f in funcs.iter_mut() {
                             f.kind = "test".to_string();
                         }
@@ -451,6 +472,7 @@ pub fn batch_sampled(repo: &Repo, sampled_shas: &[String]) -> HashMap<String, Ve
                             code: c.code,
                             comments: c.comments,
                             blanks: c.blanks,
+                            test_code: if test_path { c.code } else { c.test_code },
                         },
                         funcs,
                     })
@@ -511,58 +533,73 @@ fn parse_blob(
     registry.parser.set_language(&language).ok()?;
     let tree: Tree = registry.parser.parse(&*blob.data, None)?;
 
-    let (code, comments, blanks) =
-        count_lines(&blob.data, tree.root_node(), spec_snapshot.comment_kinds);
-    let funcs = extract_funcs(&blob.data, tree.root_node(), &spec_snapshot);
+    let root = tree.root_node();
+    let tests = test_regions(&blob.data, root, spec_snapshot.test_detect);
+    let (code, comments, blanks, test_code) =
+        count_lines(&blob.data, root, spec_snapshot.comment_kinds, &tests);
+    let mut funcs = extract_funcs(&blob.data, root, &spec_snapshot);
+    mark_test_funcs(&mut funcs, &tests);
 
     Some(CachedParse {
         language: label,
         code,
         comments,
         blanks,
+        test_code,
         funcs,
     })
 }
 
+/// Whole-file test paths: directory conventions plus file-name rules that
+/// the ecosystem's test runner itself keys on (Go `_test.go`, pytest
+/// `test_*.py`, JUnit `*Test.java`, jest `*.test.ts`, RSpec `*_spec.rb`…).
 fn is_test_path(path: &str) -> bool {
-    let p = path.to_ascii_lowercase();
-    if p.starts_with("tests/") || p.contains("/tests/") {
+    const DIRS: &[&str] = &[
+        "test",
+        "tests",
+        "__tests__",
+        "__mocks__",
+        "spec",
+        "specs",
+        "benches",
+        "testdata",
+        "e2e",
+    ];
+    let mut parts: Vec<&str> = path.split('/').collect();
+    let Some(name) = parts.pop() else {
+        return false;
+    };
+    if parts
+        .iter()
+        .any(|d| DIRS.contains(&d.to_ascii_lowercase().as_str()))
+    {
         return true;
     }
-    if p.starts_with("__tests__/") || p.contains("/__tests__/") {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s, e.to_ascii_lowercase()),
+        None => return false,
+    };
+    // `foo.test.ts`, `foo.spec.js`, `foo.test.d.ts`…
+    if stem.split('.').skip(1).any(|p| p == "test" || p == "spec") {
         return true;
     }
-    if p.contains(".spec.") {
-        return true;
-    }
-    for suf in [
-        ".test.js",
-        ".test.ts",
-        ".test.jsx",
-        ".test.tsx",
-        "_test.c",
-        "_test.cc",
-        "_test.cpp",
-        "_test.cxx",
-    ] {
-        if p.ends_with(suf) {
-            return true;
+    match ext.as_str() {
+        "go" => stem.ends_with("_test"),
+        "py" => stem.starts_with("test_") || stem.ends_with("_test") || stem == "conftest",
+        "rb" => stem.ends_with("_test") || stem.ends_with("_spec") || stem.starts_with("test_"),
+        "rs" => stem == "tests",
+        "java" | "kt" | "scala" | "php" | "hs" | "cs" => {
+            ["Test", "Tests", "IT", "Spec", "Suite", "TestCase"]
+                .iter()
+                .any(|s| stem.ends_with(s) && stem.len() > s.len())
         }
-    }
-    // Python test convention.
-    if let Some(name) = Path::new(&p).file_name().and_then(|s| s.to_str()) {
-        if name.starts_with("test_") && name.ends_with(".py") {
-            return true;
+        "c" | "cc" | "cpp" | "cxx" => {
+            stem.starts_with("test_") || stem.ends_with("_test") || stem.ends_with("_unittest")
         }
-        for prefix in ["test_"] {
-            for ext in [".c", ".cc", ".cpp", ".cxx"] {
-                if name.starts_with(prefix) && name.ends_with(ext) {
-                    return true;
-                }
-            }
-        }
+        "lua" => stem.ends_with("_spec") || stem.ends_with("_test"),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => stem.ends_with("_test"),
+        _ => false,
     }
-    false
 }
 
 /// Walk the AST and emit one `FuncDef` per top-level (or method-level)
@@ -598,16 +635,12 @@ fn build_def(source: &[u8], node: Node, spec: &LangSpec, is_method: bool) -> Opt
     let start_line = node.start_position().row as u32 + 1;
     let end_line = node.end_position().row as u32 + 1;
 
-    let mut kind = if is_method || ancestor_matches(node, spec.method_ancestor_kinds) {
+    let kind = if is_method || ancestor_matches(node, spec.method_ancestor_kinds) {
         "method"
     } else {
         "fn"
     }
     .to_string();
-
-    if is_test(source, node, spec, &name) {
-        kind = "test".to_string();
-    }
 
     let body = source
         .get(node.start_byte()..node.end_byte())
@@ -709,59 +742,382 @@ fn node_text(source: &[u8], node: Node) -> Option<String> {
     std::str::from_utf8(slice).ok().map(|s| s.to_string())
 }
 
-fn is_test(source: &[u8], node: Node, spec: &LangSpec, name: &str) -> bool {
-    match spec.test_detect {
-        TestDetect::None => false,
-        TestDetect::NamePrefix(prefix) => name.starts_with(prefix),
-        TestDetect::RustAttr => rust_test_attr(source, node),
+/// Row span (0-based, inclusive) of a syntactic test region.
+type Region = (usize, usize);
+
+/// Test regions of one parsed file, sorted and non-overlapping (a region
+/// is never descended into).
+fn test_regions(source: &[u8], root: Node, detect: TestDetect) -> Vec<Region> {
+    let mut out = Vec::new();
+    match detect {
+        TestDetect::None => {}
+        // Rust: `#![cfg(test)]` at file top → whole file.
+        TestDetect::Rust
+            if children(root)
+                .any(|c| c.kind() == "inner_attribute_item" && rust_cfg_test(&text(source, c))) =>
+        {
+            let end = root.end_position();
+            out.push((0, end.row - usize::from(end.column == 0 && end.row > 0)));
+        }
+        // JS: only top-level statements — `test(...)` deeper is app code.
+        TestDetect::Js => {
+            for c in children(root) {
+                if js_test_stmt(source, c) {
+                    out.push(span(c));
+                }
+            }
+        }
+        _ => walk_regions(source, root, detect, &mut out),
+    }
+    out
+}
+
+fn walk_regions(source: &[u8], node: Node, detect: TestDetect, out: &mut Vec<Region>) {
+    if let Some(r) = region_of(source, node, detect) {
+        out.push(r);
+        return;
+    }
+    for c in children(node) {
+        walk_regions(source, c, detect, out);
     }
 }
 
-/// Rust-specific: check preceding sibling `attribute_item`s of this
-/// function for `#[test]` / `#[tokio::test]`-style markers, OR check any
-/// ancestor `mod_item` for a `#[cfg(test)]` attribute.
-fn rust_test_attr(source: &[u8], node: Node) -> bool {
-    // Preceding attribute siblings.
-    let mut prev = node.prev_sibling();
-    while let Some(sib) = prev {
-        if sib.kind() == "attribute_item" || sib.kind() == "inner_attribute_item" {
-            if let Some(txt) = node_text(source, sib) {
-                if txt.contains("test") {
-                    return true;
-                }
-            }
-            prev = sib.prev_sibling();
-        } else {
-            break;
-        }
-    }
-    // Ancestor mod with cfg(test).
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        if p.kind() == "mod_item" {
-            // Look at siblings preceding this mod for cfg(test).
-            let mut ap = p.prev_sibling();
-            while let Some(sib) = ap {
-                if sib.kind() == "attribute_item" || sib.kind() == "inner_attribute_item" {
-                    if let Some(txt) = node_text(source, sib) {
-                        if txt.contains("cfg(test)") {
-                            return true;
-                        }
+fn region_of(source: &[u8], node: Node, detect: TestDetect) -> Option<Region> {
+    let name = || {
+        node.child_by_field_name("name")
+            .map(|n| text(source, n))
+            .unwrap_or_default()
+    };
+    let hit = match (detect, node.kind()) {
+        (TestDetect::Rust, k) if k.ends_with("_item") && k != "attribute_item" => {
+            // Attributes (and doc comments between them) are preceding
+            // siblings; the region starts at the first one.
+            let mut start = node;
+            let mut test = false;
+            let mut prev = node.prev_sibling();
+            while let Some(p) = prev {
+                match p.kind() {
+                    "attribute_item" => {
+                        let t = text(source, p);
+                        test |= rust_cfg_test(&t) || (k == "function_item" && rust_test_attr(&t));
+                        start = p;
                     }
-                    ap = sib.prev_sibling();
-                } else {
-                    break;
+                    "line_comment" | "block_comment" => {}
+                    _ => break,
                 }
+                prev = p.prev_sibling();
             }
+            return test.then(|| (start.start_position().row, node.end_position().row));
         }
-        cur = p.parent();
-    }
-    false
+        (TestDetect::Python, "decorated_definition") => {
+            let def = node.child_by_field_name("definition")?;
+            let fixture = children(node)
+                .filter(|c| c.kind() == "decorator")
+                .any(|d| py_is_fixture(&text(source, d)));
+            fixture || py_test_def(source, def)
+        }
+        (TestDetect::Python, "function_definition" | "class_definition") => {
+            py_test_def(source, node)
+        }
+        (TestDetect::Go, "function_declaration") => go_test_name(&name()),
+        (TestDetect::Java, "class_declaration") => {
+            let sup = node
+                .child_by_field_name("superclass")
+                .map(|n| text(source, n))
+                .unwrap_or_default();
+            sup.trim_end().ends_with("TestCase") || has_java_test_method(source, node)
+        }
+        (TestDetect::Java, "method_declaration") => java_test_method(source, node),
+        (TestDetect::Ruby, "method") => name().starts_with("test_"),
+        (TestDetect::Ruby, "class") => {
+            let sup = node
+                .child_by_field_name("superclass")
+                .map(|n| text(source, n))
+                .unwrap_or_default();
+            let sup = sup.trim_start_matches('<').trim();
+            sup.ends_with("Test") || sup.ends_with("TestCase") || sup.ends_with("Spec")
+        }
+        (TestDetect::Ruby, "call") => ruby_spec_block(source, node),
+        (TestDetect::Cpp, "function_definition") => {
+            let decl = node.child_by_field_name("declarator")?;
+            decl.kind() == "function_declarator"
+                && decl
+                    .child_by_field_name("declarator")
+                    .is_some_and(|d| CPP_TEST_MACROS.contains(&text(source, d).as_str()))
+        }
+        (TestDetect::Php, "class_declaration") => children(node)
+            .filter(|c| c.kind() == "base_clause")
+            .any(|b| text(source, b).trim_end().ends_with("TestCase")),
+        _ => false,
+    };
+    hit.then(|| span(node))
 }
 
-fn count_lines(source: &[u8], root: Node, comment_kinds: &[&str]) -> (u32, u32, u32) {
+fn span(node: Node) -> Region {
+    (node.start_position().row, node.end_position().row)
+}
+
+fn children(node: Node) -> impl Iterator<Item = Node> {
+    (0..node.child_count()).filter_map(move |i| node.child(i as u32))
+}
+
+fn text(source: &[u8], node: Node) -> String {
+    String::from_utf8_lossy(&source[node.start_byte()..node.end_byte()]).into_owned()
+}
+
+/// `#[test]`, `#[tokio::test(..)]`, `#[bench]`, `#[rstest]`,
+/// `#[test_case(..)]`, `#[wasm_bindgen_test]`, `#[quickcheck]`.
+fn rust_test_attr(attr: &str) -> bool {
+    let body: String = attr.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(body) = body.strip_prefix("#[") else {
+        return false;
+    };
+    let path = body.split(['(', '=', ']']).next().unwrap_or("");
+    let last = path.rsplit("::").next().unwrap_or("");
+    matches!(last, "test" | "bench" | "rstest" | "quickcheck")
+        || last.starts_with("test_")
+        || last.ends_with("_test")
+}
+
+/// `#[cfg(P)]` / `#![cfg(P)]` where predicate P can only hold under
+/// `cfg(test)`: `test`, `all(.., test, ..)`, `any(..)` with every arm
+/// implying test. `not(..)` never implies test.
+fn rust_cfg_test(attr: &str) -> bool {
+    let body: String = attr.chars().filter(|c| !c.is_whitespace()).collect();
+    let body = body.trim_start_matches('#').trim_start_matches('!');
+    let Some(pred) = body
+        .strip_prefix("[cfg(")
+        .and_then(|b| b.strip_suffix(")]"))
+    else {
+        return false;
+    };
+    cfg_implies_test(pred)
+}
+
+fn cfg_implies_test(p: &str) -> bool {
+    let split_args = |inner: &str| -> Vec<String> {
+        let (mut depth, mut cur, mut out) = (0i32, String::new(), Vec::new());
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+            cur.push(ch);
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    };
+    let inner = |f: &str| p.strip_prefix(f).and_then(|r| r.strip_suffix(')'));
+    if p == "test" {
+        true
+    } else if let Some(i) = inner("all(") {
+        split_args(i).iter().any(|a| cfg_implies_test(a))
+    } else if let Some(i) = inner("any(") {
+        let args = split_args(i);
+        !args.is_empty() && args.iter().all(|a| cfg_implies_test(a))
+    } else {
+        false
+    }
+}
+
+/// pytest defaults (`python_functions = test*`, `python_classes = Test*`)
+/// plus unittest `*TestCase` subclasses.
+fn py_test_def(source: &[u8], def: Node) -> bool {
+    let name = def
+        .child_by_field_name("name")
+        .map(|n| text(source, n))
+        .unwrap_or_default();
+    match def.kind() {
+        "function_definition" => name.starts_with("test"),
+        "class_definition" => {
+            name.starts_with("Test")
+                || def.child_by_field_name("superclasses").is_some_and(|s| {
+                    text(source, s)
+                        .trim_matches(|c| c == '(' || c == ')')
+                        .split(',')
+                        .any(|b| b.trim().ends_with("TestCase"))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn py_is_fixture(decorator: &str) -> bool {
+    let d = decorator.trim_start_matches('@').trim();
+    let path = d.split('(').next().unwrap_or("");
+    path == "fixture" || path.ends_with(".fixture")
+}
+
+/// `go test` rule: Test/Benchmark/Fuzz/Example then end, `_`, or a
+/// non-lowercase rune (`Testify` is not a test).
+fn go_test_name(name: &str) -> bool {
+    ["Test", "Benchmark", "Fuzz", "Example"].iter().any(|p| {
+        name.strip_prefix(p)
+            .is_some_and(|rest| rest.chars().next().is_none_or(|c| !c.is_lowercase()))
+    })
+}
+
+const JS_TEST_FNS: &[&str] = &[
+    "describe",
+    "it",
+    "test",
+    "suite",
+    "context",
+    "specify",
+    "fdescribe",
+    "xdescribe",
+    "fit",
+    "xit",
+    "xtest",
+];
+const JS_HOOKS: &[&str] = &[
+    "beforeEach",
+    "afterEach",
+    "beforeAll",
+    "afterAll",
+    "before",
+    "after",
+];
+
+/// `describe('x', fn)` / `it.each(t)('x', fn)` / `beforeEach(fn)` as a
+/// statement. Named blocks need a string title, hooks a function arg —
+/// keeps app-level `test(x)` calls out.
+fn js_test_stmt(source: &[u8], stmt: Node) -> bool {
+    if stmt.kind() != "expression_statement" {
+        return false;
+    }
+    let Some(call) = stmt
+        .named_child(0)
+        .filter(|c| c.kind() == "call_expression")
+    else {
+        return false;
+    };
+    let mut callee = call.child_by_field_name("function");
+    while let Some(c) = callee {
+        match c.kind() {
+            "member_expression" => callee = c.child_by_field_name("object"),
+            "call_expression" => callee = c.child_by_field_name("function"),
+            _ => break,
+        }
+    }
+    let Some(root) = callee.filter(|c| c.kind() == "identifier") else {
+        return false;
+    };
+    let root = text(source, root);
+    let first_arg = call
+        .child_by_field_name("arguments")
+        .and_then(|a| a.named_child(0))
+        .map(|a| a.kind());
+    if JS_TEST_FNS.contains(&root.as_str()) {
+        matches!(first_arg, Some("string" | "template_string"))
+    } else if JS_HOOKS.contains(&root.as_str()) {
+        matches!(
+            first_arg,
+            Some("arrow_function" | "function_expression" | "function")
+        )
+    } else {
+        false
+    }
+}
+
+const JAVA_TEST_ANNOTATIONS: &[&str] = &[
+    "Test",
+    "ParameterizedTest",
+    "RepeatedTest",
+    "TestFactory",
+    "TestTemplate",
+    "Property",
+];
+
+fn java_test_method(source: &[u8], method: Node) -> bool {
+    children(method)
+        .filter(|c| c.kind() == "modifiers")
+        .flat_map(children)
+        .filter(|a| matches!(a.kind(), "marker_annotation" | "annotation"))
+        .filter_map(|a| a.child_by_field_name("name"))
+        .any(|n| {
+            let t = text(source, n);
+            JAVA_TEST_ANNOTATIONS.contains(&t.rsplit('.').next().unwrap_or(""))
+        })
+}
+
+fn has_java_test_method(source: &[u8], node: Node) -> bool {
+    children(node).any(|c| {
+        (c.kind() == "method_declaration" && java_test_method(source, c))
+            || has_java_test_method(source, c)
+    })
+}
+
+const RSPEC_BLOCKS: &[&str] = &[
+    "describe",
+    "context",
+    "it",
+    "specify",
+    "shared_examples",
+    "shared_context",
+    "feature",
+    "scenario",
+];
+
+/// RSpec `describe/context/it ... do` blocks, bare or on `RSpec`.
+fn ruby_spec_block(source: &[u8], call: Node) -> bool {
+    let method = call
+        .child_by_field_name("method")
+        .map(|m| text(source, m))
+        .unwrap_or_default();
+    let receiver_ok = call
+        .child_by_field_name("receiver")
+        .is_none_or(|r| text(source, r) == "RSpec");
+    let has_block = call.child_by_field_name("block").is_some()
+        || children(call).any(|c| matches!(c.kind(), "do_block" | "block"));
+    receiver_ok && has_block && RSPEC_BLOCKS.contains(&method.as_str())
+}
+
+const CPP_TEST_MACROS: &[&str] = &[
+    "TEST",
+    "TEST_F",
+    "TEST_P",
+    "TYPED_TEST",
+    "TYPED_TEST_P",
+    "TEST_CASE",
+    "TEST_CASE_METHOD",
+    "TEMPLATE_TEST_CASE",
+    "SCENARIO",
+    "BOOST_AUTO_TEST_CASE",
+    "BOOST_FIXTURE_TEST_CASE",
+];
+
+/// A function is a test when its first line falls in a test region.
+fn mark_test_funcs(funcs: &mut [FuncDef], regions: &[Region]) {
+    for f in funcs {
+        if in_regions(f.start_line as usize - 1, regions) {
+            f.kind = "test".to_string();
+        }
+    }
+}
+
+fn in_regions(row: usize, regions: &[Region]) -> bool {
+    let i = regions.partition_point(|r| r.0 <= row);
+    i > 0 && row <= regions[i - 1].1
+}
+
+/// (code, comments, blanks, test_code) — test_code counts code lines
+/// whose row is inside a test region.
+fn count_lines(
+    source: &[u8],
+    root: Node,
+    comment_kinds: &[&str],
+    tests: &[Region],
+) -> (u32, u32, u32, u32) {
     if source.is_empty() {
-        return (0, 0, 0);
+        return (0, 0, 0, 0);
     }
 
     let mut ranges: Vec<(usize, usize)> = Vec::new();
@@ -771,14 +1127,22 @@ fn count_lines(source: &[u8], root: Node, comment_kinds: &[&str]) -> (u32, u32, 
     let mut blanks = 0u32;
     let mut comments = 0u32;
     let mut code = 0u32;
+    let mut test_code = 0u32;
+    let mut row = 0usize;
 
     let mut classify = |start: usize, end: usize| {
         let line = &source[start..end];
         match classify_line(line, start, &ranges) {
             LineKind::Blank => blanks += 1,
             LineKind::Comment => comments += 1,
-            LineKind::Code => code += 1,
+            LineKind::Code => {
+                code += 1;
+                if in_regions(row, tests) {
+                    test_code += 1;
+                }
+            }
         }
+        row += 1;
     };
 
     let mut line_start = 0usize;
@@ -791,7 +1155,7 @@ fn count_lines(source: &[u8], root: Node, comment_kinds: &[&str]) -> (u32, u32, 
     if line_start < source.len() {
         classify(line_start, source.len());
     }
-    (code, comments, blanks)
+    (code, comments, blanks, test_code)
 }
 
 #[derive(Copy, Clone)]
@@ -823,8 +1187,11 @@ fn classify_line(line: &[u8], line_start_byte: usize, ranges: &[(usize, usize)])
     }
 }
 
+/// `ranges` sorted by start and disjoint (comment nodes don't nest in
+/// collection) → binary search instead of a linear scan per byte.
 fn byte_inside_any(abs: usize, ranges: &[(usize, usize)]) -> bool {
-    ranges.iter().any(|(s, e)| abs >= *s && abs < *e)
+    let i = ranges.partition_point(|r| r.0 <= abs);
+    i > 0 && abs < ranges[i - 1].1
 }
 
 fn collect_comment_ranges(node: Node, comment_kinds: &[&str], out: &mut Vec<(usize, usize)>) {
@@ -846,14 +1213,18 @@ mod tests {
         let mut parser = Parser::new();
         parser.set_language(&lang).unwrap();
         let tree = parser.parse(src.as_bytes(), None).unwrap();
-        count_lines(src.as_bytes(), tree.root_node(), comment_kinds)
+        let (c, m, b, _) = count_lines(src.as_bytes(), tree.root_node(), comment_kinds, &[]);
+        (c, m, b)
     }
 
     fn parse_and_extract(src: &str, spec: &LangSpec) -> Vec<FuncDef> {
         let mut parser = Parser::new();
         parser.set_language(&spec.language).unwrap();
         let tree = parser.parse(src.as_bytes(), None).unwrap();
-        extract_funcs(src.as_bytes(), tree.root_node(), spec)
+        let mut funcs = extract_funcs(src.as_bytes(), tree.root_node(), spec);
+        let regions = test_regions(src.as_bytes(), tree.root_node(), spec.test_detect);
+        mark_test_funcs(&mut funcs, &regions);
+        funcs
     }
 
     fn spec_for(reg: &LangRegistry, ext: &str) -> LangSpec {
@@ -1109,6 +1480,16 @@ class C {
         assert!(is_test_path("src/mymodule_test.cpp"));
         assert!(!is_test_path("src/main.rs"));
         assert!(!is_test_path("lib/foo.py"));
+        assert!(is_test_path("pkg/foo_test.go"));
+        assert!(!is_test_path("pkg/footest.go"));
+        assert!(is_test_path("app/conftest.py"));
+        assert!(is_test_path("src/main/FooTest.java"));
+        assert!(!is_test_path("src/main/Test.java"));
+        assert!(!is_test_path("src/main/Contest.java"));
+        assert!(is_test_path("spec/models/user_spec.rb"));
+        assert!(is_test_path("src/a/tests.rs"));
+        assert!(!is_test_path("src/latest/x.rs"));
+        assert!(!is_test_path("src/attest.py"));
     }
 
     #[test]
@@ -1116,6 +1497,196 @@ class C {
         // Just check the helper; the snapshot integration is covered by
         // index::tests::smoke_index_tiny_repo via funcs table.
         assert!(is_test_path("tests/mod.rs"));
+    }
+
+    /// 1-based inclusive line spans of the test regions in `src`.
+    fn regions(ext: &str, src: &str) -> Vec<(usize, usize)> {
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, ext);
+        let mut parser = Parser::new();
+        parser.set_language(&spec.language).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        test_regions(src.as_bytes(), tree.root_node(), spec.test_detect)
+            .into_iter()
+            .map(|(a, b)| (a + 1, b + 1))
+            .collect()
+    }
+
+    #[test]
+    fn rust_test_regions() {
+        let src = "\
+fn prod() {}
+#[cfg(not(test))]
+fn not_test() {}
+/// doc
+#[test]
+fn t() {}
+#[tokio::test(flavor = \"multi_thread\")]
+async fn t2() {}
+#[doc = \"latest\"]
+fn also_prod() {}
+#[cfg(all(test, feature = \"x\"))]
+mod tests {
+    use super::*;
+    fn helper() {}
+}
+#[cfg(any(test, debug_assertions))]
+fn maybe() {}
+";
+        assert_eq!(regions("rs", src), [(5, 6), (7, 8), (11, 15)]);
+        assert_eq!(regions("rs", "#![cfg(test)]\nfn a() {}\n"), [(1, 2)]);
+    }
+
+    #[test]
+    fn rust_cfg_predicates() {
+        assert!(rust_cfg_test("#[cfg(test)]"));
+        assert!(rust_cfg_test("#[cfg( all( unix, test ) )]"));
+        assert!(rust_cfg_test("#[cfg(any(test, all(test, unix)))]"));
+        assert!(!rust_cfg_test("#[cfg(any(test, unix))]"));
+        assert!(!rust_cfg_test("#[cfg(not(test))]"));
+        assert!(!rust_cfg_test("#[cfg_attr(test, derive(Debug))]"));
+    }
+
+    #[test]
+    fn python_test_regions() {
+        let src = "\
+def prod(): pass
+def test_a():
+    pass
+@pytest.fixture
+def db():
+    return 1
+class TestX:
+    def helper(self): pass
+class Foo(unittest.TestCase):
+    pass
+class Testimony: pass
+@property
+def contest(): pass
+";
+        // pytest's `Test*` prefix rule includes `Testimony` — matches the runner.
+        assert_eq!(
+            regions("py", src),
+            [(2, 3), (4, 6), (7, 8), (9, 10), (11, 11)]
+        );
+    }
+
+    #[test]
+    fn go_test_regions() {
+        let src = "\
+package p
+func Testify() {}
+func TestA(t *testing.T) {}
+func Test(t *testing.T) {}
+func BenchmarkB(b *testing.B) {}
+func Test_c(t *testing.T) {}
+func ExampleFoo() {}
+func FuzzX(f *testing.F) {}
+";
+        assert_eq!(
+            regions("go", src),
+            [(3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8)]
+        );
+    }
+
+    #[test]
+    fn js_ts_test_regions() {
+        let src = "\
+import x from 'y';
+describe('suite', () => {
+  it('a', () => {});
+});
+test.each([1])('t %s', (n) => {});
+beforeEach(() => {});
+test(value);
+function f() { it('nested', () => {}); }
+";
+        assert_eq!(regions("ts", src), [(2, 4), (5, 5), (6, 6)]);
+        assert_eq!(regions("js", src), [(2, 4), (5, 5), (6, 6)]);
+    }
+
+    #[test]
+    fn java_test_regions() {
+        let src = "\
+class Prod {
+  void run() {}
+}
+class FooTest {
+  private int x;
+  @Test
+  void a() {}
+}
+class Legacy extends junit.framework.TestCase {
+}
+";
+        assert_eq!(regions("java", src), [(4, 8), (9, 10)]);
+    }
+
+    #[test]
+    fn ruby_test_regions() {
+        let src = "\
+def prod; end
+class FooTest < Minitest::Test
+  def helper; end
+end
+RSpec.describe Foo do
+  it 'works' do
+  end
+end
+describe 'x' do
+end
+it_is = 1
+";
+        assert_eq!(regions("rb", src), [(2, 4), (5, 8), (9, 10)]);
+    }
+
+    #[test]
+    fn cpp_test_regions() {
+        let src = "\
+int prod() { return 1; }
+TEST(Suite, Name) {
+  EXPECT_EQ(1, 1);
+}
+TEST_F(Fixture, Name) {
+}
+";
+        assert_eq!(regions("cpp", src), [(2, 4), (5, 6)]);
+    }
+
+    #[test]
+    fn php_test_regions() {
+        let src = "\
+<?php
+class Prod {}
+class FooTest extends TestCase {
+  public function testA() {}
+}
+";
+        assert_eq!(regions("php", src), [(3, 5)]);
+    }
+
+    #[test]
+    fn test_code_counts_only_code_lines_in_regions() {
+        let src = "\
+fn prod() {}
+
+#[cfg(test)]
+mod tests {
+    // comment
+
+    #[test]
+    fn t() {}
+}
+";
+        let reg = LangRegistry::new();
+        let spec = spec_for(&reg, "rs");
+        let mut parser = Parser::new();
+        parser.set_language(&spec.language).unwrap();
+        let tree = parser.parse(src.as_bytes(), None).unwrap();
+        let r = test_regions(src.as_bytes(), tree.root_node(), spec.test_detect);
+        let (code, comments, blanks, test_code) =
+            count_lines(src.as_bytes(), tree.root_node(), spec.comment_kinds, &r);
+        assert_eq!((code, comments, blanks, test_code), (6, 1, 2, 5));
     }
 
     #[test]

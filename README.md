@@ -139,21 +139,50 @@ churn story lives in the test suite, not the core.
 
 tokei-style snapshot of HEAD (parsed live, not the working tree), grouped
 `--by lang|dir|file` (default `lang`, `--depth N` for `dir`), with a
-`Total` row. Beyond line counts: function count + longest function,
-median age of surviving lines, top owner by surviving lines, 90-day churn.
-Files without a grammar show as `other` (lines only). Filters: `--lang`,
-`--path`. This repo:
+`Total` row. Beyond line counts: test code (`test_code`, `test_pct` of
+code lines — see [Test detection](#test-detection)), function count +
+longest function, median age of surviving lines, top owner by surviving
+lines, 90-day churn. Files without a grammar show as `other` (lines only).
+Filters: `--lang`, `--path`. This repo:
 
 ```
-lang     | files | lines | code | comments | blanks | funcs | max_func | median_age_days | owner          | owner_pct | churn_90d
----------+-------+-------+------+----------+--------+-------+----------+-----------------+----------------+-----------+----------
-Rust     | 21    | 6878  | 5731 | 588      | 559    | 232   | 344      | 95              | neumann-mlucas | 100       | 1671     
-Markdown | 4     | 1999  | 1622 | 0        | 377    | 0     |          | 95              | neumann-mlucas | 100       | 119      
-Bash     | 1     | 366   | 298  | 39       | 29     | 3     | 9        | 95              | neumann-mlucas | 100       | 153      
-other    | 7     | 299   |      |          |        | 0     |          | 94              | neumann-mlucas | 100       | 5        
-JSON     | 1     | 14    | 14   | 0        | 0      | 0     |          | 94              | neumann-mlucas | 100       | 0        
-Total    | 34    | 9556  | 7665 | 627      | 965    | 235   | 344      | 95              | neumann-mlucas | 100       | 1948     
+lang     | files | lines | code | comments | blanks | test_code | test_pct | funcs | max_func | median_age_days | owner          | owner_pct | churn_90d
+---------+-------+-------+------+----------+--------+-----------+----------+-------+----------+-----------------+----------------+-----------+----------
+Rust     | 21    | 7188  | 6005 | 616      | 567    | 2487      | 41.4     | 237   | 368      | 95              | neumann-mlucas | 100       | 2037     
+Markdown | 4     | 2020  | 1640 | 0        | 380    | 0         | 0        | 0     |          | 95              | neumann-mlucas | 100       | 140      
+Bash     | 1     | 366   | 298  | 39       | 29     | 0         | 0        | 3     | 9        | 95              | neumann-mlucas | 100       | 153      
+other    | 7     | 299   |      |          |        |           |          | 0     |          | 94              | neumann-mlucas | 100       | 5        
+JSON     | 1     | 14    | 14   | 0        | 0      | 0         | 0        | 0     |          | 94              | neumann-mlucas | 100       | 0        
+Total    | 34    | 9887  | 7957 | 655      | 976    | 2487      | 31.3     | 240   | 368      | 95              | neumann-mlucas | 100       | 2335     
 ```
+
+`burndown --by kind` gives the same test / non-test split per bucket.
+
+#### Test detection
+
+Static, per code line, no toolchain or test run. A line is test code if:
+
+1. **Path** — a `test(s)/`, `__tests__/`, `spec(s)/`, `benches/`,
+   `testdata/`, `e2e/` directory, or the runner's own file convention:
+   Go `*_test.go`, pytest `test_*.py` / `*_test.py` / `conftest.py`, jest
+   `*.test.*` / `*.spec.*`, JUnit `*Test.java` / `*IT.java`, RSpec
+   `*_spec.rb`, Rust `tests.rs`, C/C++ `test_*` / `*_test` / `*_unittest`.
+2. **Syntax** (tree-sitter region, attributes/decorators included):
+   - Rust: items under `#[cfg(test)]` (predicate must imply `test`;
+     `not(test)` / `any(test, x)` don't), `#![cfg(test)]` files, fns with
+     `#[test]`, `#[<crate>::test]`, `#[bench]`, `#[rstest]`, `#[test_case]`.
+   - Python: `def test*`, `class Test*`, `*TestCase` subclasses, pytest
+     fixtures.
+   - Go: `Test|Benchmark|Fuzz|Example` + non-lowercase (the `go test` rule).
+   - JS/TS: top-level `describe/it/test(...)` with a string title (incl.
+     `.each/.only/.skip`), lifecycle hooks with a function arg.
+   - Java: classes with a `@Test`-family method, JUnit 3 `TestCase`.
+   - Ruby: `def test_*`, `*Test` / `*TestCase` classes, RSpec blocks.
+   - C++: GoogleTest / Catch2 / Boost.Test macros.
+   - PHP: `*TestCase` subclasses.
+
+`funcs.kind = 'test'` uses the same regions. Not detected: production
+code that only tests call (needs a call graph).
 
 ### `age`
 
@@ -291,7 +320,8 @@ Common to every query subcommand:
 - `--path PREFIX` — path prefix filter.
 - `--bucket auto|day|week|month|tag|commit` — bucketing.
 - `--format tsv|csv|json|table` — default: `tsv` on pipe, `table` on TTY.
-- `--by language|author|module` — group axis for `burndown` / `churn`.
+- `--by language|author|module` — group axis for `burndown` / `churn`
+  (`burndown` also takes `kind`: test vs non-test code).
 
 Subcommand-specific:
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use duckdb::Connection;
 
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS file_stats (
     code     INTEGER NOT NULL,
     comments INTEGER NOT NULL,
     blanks   INTEGER NOT NULL,
+    -- code lines that are test code (test path, or inside a test region)
+    test_code INTEGER NOT NULL,
     PRIMARY KEY (sha, path)
 );
 CREATE INDEX IF NOT EXISTS idx_file_stats_lang ON file_stats(language);

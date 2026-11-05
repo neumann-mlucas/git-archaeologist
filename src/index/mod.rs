@@ -447,7 +447,7 @@ pub fn snapshot_head(repo: &Repo, cache: &Cache) -> Result<()> {
         );
     }
     cache.conn.execute_batch(
-        "CREATE OR REPLACE TEMP TABLE head_stats (path TEXT, language TEXT, code INTEGER, comments INTEGER, blanks INTEGER);
+        "CREATE OR REPLACE TEMP TABLE head_stats (path TEXT, language TEXT, code INTEGER, comments INTEGER, blanks INTEGER, test_code INTEGER);
          CREATE OR REPLACE TEMP TABLE head_funcs (path TEXT, start_line INTEGER, end_line INTEGER);",
     )?;
     let files = treesitter::batch_sampled(repo, std::slice::from_ref(&head))
@@ -457,7 +457,14 @@ pub fn snapshot_head(repo: &Repo, cache: &Cache) -> Result<()> {
     let mut funcs = cache.conn.appender("head_funcs")?;
     for f in files {
         let s = &f.stat;
-        stats.append_row(params![s.path, s.language, s.code, s.comments, s.blanks])?;
+        stats.append_row(params![
+            s.path,
+            s.language,
+            s.code,
+            s.comments,
+            s.blanks,
+            s.test_code
+        ])?;
         for d in f.funcs {
             funcs.append_row(params![s.path, d.start_line, d.end_line])?;
         }
@@ -489,7 +496,8 @@ fn append_snapshot(
             f.stat.language,
             f.stat.code,
             f.stat.comments,
-            f.stat.blanks
+            f.stat.blanks,
+            f.stat.test_code
         ])?;
         for def in f.funcs {
             funcs_app.append_row(params![

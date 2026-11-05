@@ -302,6 +302,20 @@ pub fn burndown(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
              GROUP  BY bucket, language
              ORDER  BY bucket, language",
         ),
+        "kind" => format!(
+            // Test vs non-test code per snapshot (file_stats.test_code).
+            "SELECT c.bucket_key                    AS bucket,
+                    k.kind                          AS kind,
+                    SUM(CASE WHEN k.kind = 'test' THEN fs.test_code
+                             ELSE fs.code - fs.test_code END) AS loc
+             FROM   commits c
+             JOIN   file_stats fs ON fs.sha = c.sha
+             CROSS  JOIN (VALUES ('code'), ('test')) k(kind)
+             {author_join}
+             WHERE  c.is_sampled = TRUE {filter} {path_filter} {lang_filter}
+             GROUP  BY bucket, kind
+             ORDER  BY bucket, kind",
+        ),
         "author" => {
             let path_fc = format!(
                 "{}{}",
@@ -327,7 +341,7 @@ pub fn burndown(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
                  ORDER  BY bucket, author",
             )
         }
-        other => bail!("--by must be one of language|author, got {other:?}"),
+        other => bail!("--by must be one of language|kind|author, got {other:?}"),
     };
     run_sql(cache, &sql)
 }
@@ -686,12 +700,12 @@ pub fn stats(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
     let sql = format!(
         "WITH files AS (
              SELECT p.path, COALESCE(hs.language, 'other') AS language,
-                    hs.code, hs.comments, hs.blanks
+                    hs.code, hs.comments, hs.blanks, hs.test_code
              FROM   (SELECT path FROM head_stats UNION SELECT DISTINCT path FROM line_births) p
              LEFT   JOIN head_stats hs USING (path)
          ),
          keyed AS (
-             SELECT path, {key} AS g, code, comments, blanks
+             SELECT path, {key} AS g, code, comments, blanks, test_code
              FROM   files
              WHERE  1=1 {file_filter}
          ),
@@ -703,7 +717,8 @@ pub fn stats(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
          ),
          f AS (
              SELECT g, COUNT(*) AS files, SUM(code) AS code,
-                    SUM(comments) AS comments, SUM(blanks) AS blanks
+                    SUM(comments) AS comments, SUM(blanks) AS blanks,
+                    SUM(test_code) AS test_code
              FROM   keyed GROUP BY ROLLUP (g)
          ),
          l AS (
@@ -733,6 +748,8 @@ pub fn stats(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
                 f.files                                       AS files,
                 COALESCE(l.lines, 0)                          AS lines,
                 f.code, f.comments, f.blanks,
+                f.test_code                                   AS test_code,
+                round(100.0 * f.test_code / NULLIF(f.code, 0), 1) AS test_pct,
                 COALESCE(fn.funcs, 0)                         AS funcs,
                 fn.max_func                                   AS max_func,
                 CAST(round(l.age) AS BIGINT)                  AS median_age_days,
