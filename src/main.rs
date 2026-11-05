@@ -437,9 +437,16 @@ fn render(headers: &[String], rows: &[Vec<String>], format: Format) -> Result<()
     let mut out = out.lock();
     match format {
         Format::Tsv => {
-            writeln!(out, "{}", headers.join("\t"))?;
+            let line = |cells: &[String]| {
+                cells
+                    .iter()
+                    .map(|s| tsv_escape(s))
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            };
+            writeln!(out, "{}", line(headers))?;
             for r in rows {
-                writeln!(out, "{}", r.join("\t"))?;
+                writeln!(out, "{}", line(r))?;
             }
         }
         Format::Csv => {
@@ -516,6 +523,18 @@ fn render(headers: &[String], rows: &[Vec<String>], format: Format) -> Result<()
     Ok(())
 }
 
+/// Backslash-escape TSV metacharacters (PostgreSQL text-format convention)
+/// so one row stays one line. DuckDB `read_csv(delim='\t')` reads it back.
+fn tsv_escape(s: &str) -> String {
+    if !s.contains(['\\', '\t', '\n', '\r']) {
+        return s.to_string();
+    }
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 fn csv_escape(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
         format!("\"{}\"", s.replace('"', "\"\""))
@@ -538,4 +557,15 @@ fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tsv_escape;
+
+    #[test]
+    fn tsv_escape_keeps_one_row_per_line() {
+        assert_eq!(tsv_escape("plain"), "plain");
+        assert_eq!(tsv_escape("a\tb\nc\r\\"), "a\\tb\\nc\\r\\\\");
+    }
 }
