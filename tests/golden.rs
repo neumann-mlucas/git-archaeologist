@@ -538,6 +538,37 @@ fn tier1_golden_integration() {
         );
     }
 
+    // --- every filter accepted by every subcommand (SQL must bind) ---
+    let all_filters = [
+        "--from",
+        "2025-01-01",
+        "--to",
+        "2025-12-31",
+        "--author",
+        "alice",
+        "--path",
+        "src",
+        "--lang",
+        "rust",
+        "--format",
+        "tsv",
+    ];
+    for cmd in [
+        &["burndown", "--by", "language"][..],
+        &["burndown", "--by", "author"],
+        &["classify"],
+        &["churn", "--by", "module"],
+        &["churn", "--by", "lang"],
+        &["churn", "--by", "author"],
+        &["age"],
+        &["coupling"],
+        &["hotspot"],
+        &["cohort"],
+        &["survival"],
+    ] {
+        fx.arch_stdout(&[cmd, &all_filters[..]].concat());
+    }
+
     // --- export parquet round-trip ---
     let out_dir = fx.root.path().join("export");
     fx.arch_stdout(&["export", "parquet", out_dir.to_str().unwrap()]);

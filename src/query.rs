@@ -50,13 +50,28 @@ impl Filters {
     /// any clauses apply; empty otherwise. Author filter joins via
     /// `authors` — caller must include that join.
     pub fn commit_where(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
+        format!(
+            "{}{}",
+            self.time_where("c.authored_at"),
+            self.author_where()
+        )
+    }
+
+    /// `--from` / `--to` on an arbitrary unix-seconds column.
+    pub fn time_where(&self, ts_col: &str) -> String {
+        let mut out = String::new();
         if let Some(f) = self.from {
-            parts.push(format!("c.authored_at >= {f}"));
+            out.push_str(&format!(" AND {ts_col} >= {f}"));
         }
         if let Some(t) = self.to {
-            parts.push(format!("c.authored_at < {t}"));
+            out.push_str(&format!(" AND {ts_col} < {t}"));
         }
+        out
+    }
+
+    /// `--author` on the `authors a` join (see `author_join`).
+    fn author_where(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
         if let Some(a) = &self.author {
             let a = sql_escape(a).to_ascii_lowercase();
             parts.push(format!(
@@ -87,6 +102,15 @@ impl Filters {
                 format!(" AND LOWER({lang_col}) IN ({})", list.join(","))
             }
             _ => String::new(),
+        }
+    }
+
+    /// `--lang` for tables without a language column: restrict `path_col`
+    /// to paths whose extension maps to one of the languages.
+    pub fn lang_path_where(&self, path_col: &str) -> String {
+        match self.lang_where("language") {
+            w if w.is_empty() => w,
+            w => format!(" AND {path_col} IN (SELECT path FROM file_churn WHERE 1=1 {w})"),
         }
     }
 
@@ -126,7 +150,17 @@ fn sql_escape(s: &str) -> String {
 
 /// Conventional-commit type shares per bucket + breaking/revert rates.
 pub fn classify(cache: &Cache, filters: &Filters) -> Result<Table> {
-    let filter = filters.commit_where();
+    let mut filter = filters.commit_where();
+    let file_filter = format!(
+        "{}{}",
+        filters.path_where("fc.path"),
+        filters.lang_where("fc.language")
+    );
+    if !file_filter.is_empty() {
+        filter.push_str(&format!(
+            " AND c.sha IN (SELECT fc.sha FROM file_churn fc WHERE 1=1 {file_filter})"
+        ));
+    }
     let join = filters.author_join();
     let sql = format!(
         "SELECT
@@ -146,26 +180,39 @@ pub fn classify(cache: &Cache, filters: &Filters) -> Result<Table> {
     run_sql(cache, &sql)
 }
 
-/// File age histogram — days since first touch, bucketed.
+/// File age histogram — days since first touch, bucketed, over files
+/// alive at HEAD (any path in `line_births`).
+///
+/// `--from`/`--to` select files by first-touch date; `--author` selects
+/// files whose first-touch commit is theirs.
 pub fn age(cache: &Cache, filters: &Filters) -> Result<Table> {
-    // First-touched = MIN(authored_at) for a path across file_churn.
-    // Age in days = (now - first_touched) / 86400. Bucket into 7-day bins.
     let path_filter = filters.path_where("fc.path");
+    let lang_filter = filters.lang_where("fc.language");
+    let time_filter = filters.time_where("ft.first_at");
+    let author_filter = filters.author_where();
+    let author_join = if filters.author.is_some() {
+        " JOIN authors a ON a.id = ft.creator"
+    } else {
+        ""
+    };
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let sql = format!(
         "WITH first_touch AS (
-             SELECT fc.path              AS path,
-                    MIN(c.authored_at)   AS first_at
+             SELECT fc.path                                AS path,
+                    MIN(c.authored_at)                     AS first_at,
+                    arg_min(c.author_id, c.authored_at)    AS creator
              FROM   file_churn fc
              JOIN   commits    c ON c.sha = fc.sha
-             WHERE  1=1 {path_filter}
+             WHERE  fc.path IN (SELECT path FROM line_births) {path_filter} {lang_filter}
              GROUP  BY fc.path
          )
-         SELECT CAST((( {now} - first_at ) / 86400 / 7) AS BIGINT) * 7 AS age_days_bucket,
-                COUNT(*)                                                AS files
-         FROM first_touch
-         GROUP BY age_days_bucket
-         ORDER BY age_days_bucket",
+         SELECT CAST((( {now} - ft.first_at ) / 86400 / 7) AS BIGINT) * 7 AS age_days_bucket,
+                COUNT(*)                                                   AS files
+         FROM   first_touch ft
+         {author_join}
+         WHERE  1=1 {time_filter} {author_filter}
+         GROUP  BY age_days_bucket
+         ORDER  BY age_days_bucket",
     );
     run_sql(cache, &sql)
 }
@@ -179,7 +226,7 @@ pub fn age(cache: &Cache, filters: &Filters) -> Result<Table> {
 pub fn churn(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result<Table> {
     let filter = filters.commit_where();
     let path_filter = filters.path_where("fc.path");
-    let lang_filter = filters.lang_where("fs.language");
+    let lang_filter = filters.lang_where("fc.language");
     let join = filters.author_join();
 
     let sql = match by {
@@ -191,20 +238,18 @@ pub fn churn(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
              FROM   file_churn fc
              JOIN   commits    c ON c.sha = fc.sha
              {join}
-             WHERE  c.is_merge = FALSE {filter} {path_filter}
+             WHERE  c.is_merge = FALSE {filter} {path_filter} {lang_filter}
              GROUP  BY bucket, module
              ORDER  BY bucket, added DESC",
         ),
         "lang" | "language" => format!(
-            // Language attribution is only known for sampled commits (via
-            // file_stats). Join fc → fs on (sha,path); rows without a
-            // language row are grouped as 'unknown' so they still show up.
+            // Language by extension, stored per row at index time; files
+            // no grammar claims group as 'unknown'.
             "SELECT c.bucket_key                                    AS bucket,
-                    COALESCE(fs.language, 'unknown')                AS language,
+                    COALESCE(fc.language, 'unknown')                AS language,
                     SUM(fc.added)                                   AS added,
                     SUM(fc.deleted)                                 AS deleted
              FROM   file_churn fc
-             LEFT   JOIN file_stats fs ON fs.sha = fc.sha AND fs.path = fc.path
              JOIN   commits    c ON c.sha = fc.sha
              {join}
              WHERE  c.is_merge = FALSE {filter} {path_filter} {lang_filter}
@@ -219,7 +264,7 @@ pub fn churn(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
              FROM   file_churn fc
              JOIN   commits    c  ON c.sha = fc.sha
              JOIN   authors    a  ON a.id = c.author_id
-             WHERE  c.is_merge = FALSE {filter} {path_filter}
+             WHERE  c.is_merge = FALSE {filter} {path_filter} {lang_filter}
              GROUP  BY bucket, author
              ORDER  BY bucket, added DESC"
         ),
@@ -257,7 +302,11 @@ pub fn burndown(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
              ORDER  BY bucket, language",
         ),
         "author" => {
-            let path_fc = filters.path_where("fc.path");
+            let path_fc = format!(
+                "{}{}",
+                filters.path_where("fc.path"),
+                filters.lang_where("fc.language")
+            );
             format!(
                 "WITH per_bucket AS (
                      SELECT c.bucket_key         AS bucket,
@@ -358,13 +407,14 @@ pub fn coupling(
     let path_filter_a = filters.path_where("a.path");
     let path_filter_b = filters.path_where("b.path");
     let join = filters.author_join();
+    let lang_filter = filters.lang_where("fc.language");
     let sql = format!(
         "WITH kept AS (
              SELECT c.sha, fc.path
              FROM   file_churn fc
              JOIN   commits    c ON c.sha = fc.sha
              {join}
-             WHERE  c.is_merge = FALSE {filter}
+             WHERE  c.is_merge = FALSE {filter} {lang_filter}
          ),
          sized AS (
              SELECT sha
@@ -389,36 +439,32 @@ pub fn coupling(
 /// Cohort-stacked LOC series. For each bucket B, sum surviving lines
 /// whose `birth_bucket <= B`, grouped by birth_bucket.
 pub fn cohort(cache: &Cache, filters: &Filters) -> Result<Table> {
-    let path_filter = filters.path_where("lb.path");
-    // birth_bucket per line is fixed at index-time; --from/--to filter by
-    // the birth timestamp of that cohort. Convert bucket_key back to a
-    // birth authored_at via the commits table.
-    let mut where_parts = vec!["1=1".to_string()];
-    if let Some(f) = filters.from {
-        where_parts.push(format!("c_birth.authored_at >= {f}"));
-    }
-    if let Some(t) = filters.to {
-        where_parts.push(format!("c_birth.authored_at < {t}"));
-    }
-    let cohort_where = where_parts.join(" AND ");
-
-    // Skip the commits join when there's no date filter — otherwise
-    // we drag 800k line_births rows through a join that filters nothing.
-    let has_date_filter = filters.from.is_some() || filters.to.is_some();
-    let filtered_lb_sql = if has_date_filter {
-        format!(
-            "SELECT lb.birth_bucket
+    let file_filter = format!(
+        "{}{}",
+        filters.path_where("lb.path"),
+        filters.lang_path_where("lb.path")
+    );
+    // Date/author filters select cohorts by their birth commit. Skip the
+    // commits join when unfiltered — it would drag every line_births row
+    // through a join that filters nothing.
+    let filtered_lb_sql =
+        if filters.from.is_some() || filters.to.is_some() || filters.author.is_some() {
+            format!(
+                "SELECT lb.birth_bucket
              FROM   line_births lb
-             JOIN   commits c_birth ON c_birth.sha = lb.birth_sha
-             WHERE  {cohort_where} {path_filter}"
-        )
-    } else {
-        format!(
-            "SELECT lb.birth_bucket
+             JOIN   commits c ON c.sha = lb.birth_sha
+             {}
+             WHERE  1=1 {} {file_filter}",
+                filters.author_join(),
+                filters.commit_where(),
+            )
+        } else {
+            format!(
+                "SELECT lb.birth_bucket
              FROM   line_births lb
-             WHERE  1=1 {path_filter}"
-        )
-    };
+             WHERE  1=1 {file_filter}"
+            )
+        };
 
     let sql = format!(
         // `line_births` only holds surviving lines at HEAD, so a line
@@ -460,8 +506,16 @@ pub fn cohort(cache: &Cache, filters: &Filters) -> Result<Table> {
 /// line; alive at HEAD = COUNT of line_births rows born in B. `--fit exp`
 /// returns a scalar half-life when >= 100 deletion events, else NULL.
 pub fn survival(cache: &Cache, filters: &Filters, fit_exp: bool) -> Result<Table> {
-    let path_filter = filters.path_where("lb.path");
-    let birth_path_filter = filters.path_where("h.path");
+    let path_filter = format!(
+        "{}{}",
+        filters.path_where("lb.path"),
+        filters.lang_path_where("lb.path")
+    );
+    let birth_path_filter = format!(
+        "{}{}",
+        filters.path_where("h.path"),
+        filters.lang_path_where("h.path")
+    );
     let commit_filter = filters.commit_where();
     let author_join = filters.author_join();
 
@@ -482,7 +536,9 @@ pub fn survival(cache: &Cache, filters: &Filters, fit_exp: bool) -> Result<Table
          alive_now AS (
              SELECT lb.birth_bucket AS cohort, COUNT(*) AS alive
              FROM   line_births lb
-             WHERE  1=1 {path_filter}
+             JOIN   commits c ON c.sha = lb.birth_sha
+             {author_join}
+             WHERE  1=1 {commit_filter} {path_filter}
              GROUP  BY lb.birth_bucket
          )
          SELECT b.cohort                                    AS birth_bucket,
