@@ -358,6 +358,10 @@ impl LangRegistry {
         }
     }
 
+    pub fn label_for(&self, path: &str) -> Option<&'static str> {
+        self.spec_for(path).map(|s| s.label)
+    }
+
     fn spec_for(&self, path: &str) -> Option<&LangSpec> {
         let ext = Path::new(path).extension().and_then(|s| s.to_str())?;
         self.by_ext.get(ext.to_ascii_lowercase().as_str())

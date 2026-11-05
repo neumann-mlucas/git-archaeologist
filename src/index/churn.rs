@@ -9,13 +9,14 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use gix::bstr::ByteSlice;
 use gix::diff::Rewrites;
 use imara_diff::intern::InternedInput;
 use imara_diff::{Algorithm, Sink};
 use rayon::prelude::*;
 
+use crate::index::treesitter::LangRegistry;
 use crate::repo::Repo;
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,9 @@ pub struct FileChurn {
     pub path: String,
     pub added: u32,
     pub deleted: u32,
+    /// Registry label by extension (SPEC: extension-only detection);
+    /// `None` for files no grammar claims.
+    pub language: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,31 +50,6 @@ pub struct CommitDiff {
 
 const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
-/// Walk every non-merge commit reachable from HEAD; return the
-/// `(sha, first-parent-oid)` job list the chunked indexer slices into
-/// windows. Merge commits are silently dropped.
-pub fn collect_all_jobs(repo: &Repo) -> Result<Vec<(String, Option<gix::ObjectId>)>> {
-    let head_id = repo.git.head_id().context("resolving HEAD id")?;
-    let walk = repo
-        .git
-        .rev_walk([head_id])
-        .sorting(gix::traverse::commit::simple::Sorting::ByCommitTimeNewestFirst)
-        .all()
-        .context("starting rev walk for diff")?;
-
-    let mut jobs: Vec<(String, Option<gix::ObjectId>)> = Vec::new();
-    for info in walk {
-        let info = info.context("walking commit for diff")?;
-        let commit = info.object().context("loading commit object")?;
-        let parents: Vec<_> = commit.parent_ids().collect();
-        if parents.len() > 1 {
-            continue;
-        }
-        jobs.push((commit.id().to_string(), parents.first().map(|p| p.detach())));
-    }
-    Ok(jobs)
-}
-
 /// Run the diff over a slice of jobs. Each rayon worker opens its own
 /// `gix::Repository` via `map_init` — gix::Repository is `!Sync` but
 /// re-opening the same `.git/` from N threads is safe.
@@ -82,9 +61,17 @@ pub fn process_jobs(
     let results: Vec<(String, CommitDiff)> = jobs
         .par_iter()
         .map_init(
-            || gix::open(&git_dir).expect("open per-worker repo"),
-            |worker_git, (sha, parent_id)| {
-                let diff = diff_one(worker_git, sha, parent_id.as_ref());
+            || {
+                (
+                    gix::open(&git_dir).expect("open per-worker repo"),
+                    LangRegistry::new(),
+                )
+            },
+            |(worker_git, reg), (sha, parent_id)| {
+                let mut diff = diff_one(worker_git, sha, parent_id.as_ref());
+                for c in &mut diff.churn {
+                    c.language = reg.label_for(&c.path);
+                }
                 (sha.clone(), diff)
             },
         )
@@ -167,6 +154,7 @@ fn handle_change<'a>(
                 path,
                 added: lines,
                 deleted: 0,
+                language: None,
             });
         }
         Event::Deletion { entry_mode, id } => {
@@ -192,6 +180,7 @@ fn handle_change<'a>(
                 path,
                 added: 0,
                 deleted: lines,
+                language: None,
             });
         }
         Event::Modification {
@@ -225,6 +214,7 @@ fn handle_change<'a>(
                 path,
                 added,
                 deleted,
+                language: None,
             });
         }
         Event::Rewrite {
@@ -274,6 +264,7 @@ fn handle_change<'a>(
                 path,
                 added,
                 deleted,
+                language: None,
             });
         }
     }

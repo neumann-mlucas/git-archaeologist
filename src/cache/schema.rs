@@ -1,7 +1,7 @@
 use anyhow::Result;
 use duckdb::Connection;
 
-pub const SCHEMA_VERSION: &str = "3";
+pub const SCHEMA_VERSION: &str = "4";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS file_churn (
     path    TEXT NOT NULL,
     added   INTEGER NOT NULL,
     deleted INTEGER NOT NULL,
+    language TEXT,
     PRIMARY KEY (sha, path)
 );
 CREATE INDEX IF NOT EXISTS idx_file_churn_path ON file_churn(path);

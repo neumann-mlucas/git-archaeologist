@@ -79,13 +79,6 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     // in tension; the value below is a middle-ground default.
     const INDEX_CHUNK: usize = 1000;
 
-    // Pre-collect the (sha, parent_id) list once for the whole DAG so
-    // each chunk's churn call can slice into it instead of re-walking
-    // rev-list per chunk. Also index by sha for O(1) chunk lookup.
-    let all_jobs = churn::collect_all_jobs(repo).unwrap_or_default();
-    let job_by_sha: std::collections::HashMap<String, (String, Option<gix::ObjectId>)> =
-        all_jobs.iter().map(|j| (j.0.clone(), j.clone())).collect();
-
     // Appender flush happens once per chunk boundary (below), not per
     // commit. Each flush syncs 7 tables to disk; batching them at the
     // chunk edge amortizes the round-trips against INDEX_CHUNK rows.
@@ -153,26 +146,22 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         .enumerate()
         .collect();
     for window in commit_pairs.chunks(INDEX_CHUNK) {
-        // Pending shas in this window (skip already-indexed).
-        let pending_shas: Vec<String> = window
-            .iter()
-            .filter_map(|(_, (commit, _))| {
-                if already.contains(&commit.sha) && !opts.force_full {
-                    None
-                } else {
-                    Some(commit.sha.clone())
-                }
-            })
-            .collect();
-        if pending_shas.is_empty() {
+        let pending = |c: &CommitInfo| opts.force_full || !already.contains(&c.sha);
+        if !window.iter().any(|(_, (c, _))| pending(c)) {
             continue;
         }
 
-        // Slice the pre-collected job list to just this chunk (skips
-        // shas that were already-indexed or aren't in the DAG).
-        let chunk_jobs: Vec<_> = pending_shas
+        // Diff every pending non-merge commit against its first parent
+        // (SPEC §Indexing pipeline step 5) — same commit set as `commits`.
+        let chunk_jobs: Vec<_> = window
             .iter()
-            .filter_map(|s| job_by_sha.get(s).cloned())
+            .filter(|(_, (c, _))| !c.is_merge && pending(c))
+            .map(|(_, (c, _))| {
+                (
+                    c.sha.clone(),
+                    c.parents.first().and_then(|p| p.parse().ok()),
+                )
+            })
             .collect();
         let mut churn_map = churn::process_jobs(repo, &chunk_jobs);
         let sampled_shas: Vec<String> = window
@@ -223,7 +212,8 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
 
             if let Some(diff) = churn_map.remove(&commit.sha) {
                 for c in diff.churn {
-                    churn_app.append_row(params![commit.sha, c.path, c.added, c.deleted])?;
+                    churn_app
+                        .append_row(params![commit.sha, c.path, c.added, c.deleted, c.language])?;
                 }
                 for h in diff.hunks {
                     hunks_app.append_row(params![
@@ -340,9 +330,8 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         )?;
     }
 
-    if let Some(head) = all_commits.last() {
-        queries::set_indexed_head(&cache.conn, &head.sha)?;
-    }
+    let head = repo.git.head_id().context("resolving HEAD")?.to_string();
+    queries::set_indexed_head(&cache.conn, &head)?;
 
     // Rebuild secondary indexes after bulk write completes. Query paths
     // downstream (cohort fold, subcommand queries) depend on them.
@@ -361,7 +350,10 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
 
     // Phase 3 — cohort fold materializes `line_births` from hunks.
     eprintln!("cohort fold…");
-    cohort::fold_and_materialize(cache).context("cohort fold")?;
+    // `line_births` = lines alive at HEAD, so only HEAD's ancestry folds;
+    // unmerged branches would splice foreign hunks into HEAD's files.
+    let on_head = ancestry(&all_commits, &head);
+    cohort::fold_and_materialize(cache, &on_head).context("cohort fold")?;
 
     // Recreate line_births indexes after the fold's bulk insert.
     cache.conn.execute_batch(
@@ -370,6 +362,25 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Every sha reachable from `head` through the in-memory parent graph.
+fn ancestry(commits: &[CommitInfo], head: &str) -> HashSet<String> {
+    let parents: std::collections::HashMap<&str, &[String]> = commits
+        .iter()
+        .map(|c| (c.sha.as_str(), c.parents.as_slice()))
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack = vec![head];
+    while let Some(sha) = stack.pop() {
+        if !seen.insert(sha.to_string()) {
+            continue;
+        }
+        if let Some(ps) = parents.get(sha) {
+            stack.extend(ps.iter().map(String::as_str));
+        }
+    }
+    seen
 }
 
 fn wipe_data(cache: &Cache) -> Result<()> {

@@ -5,9 +5,10 @@
 //! Algorithm (SPEC §Indexing pipeline, Phase 2):
 //!   1. Load every non-merge hunk joined with its commit's authored_at +
 //!      bucket_key.
-//!   2. Build a rename alias map (`prev_path` → `path`) so a file's
-//!      history spans its rename chain.
-//!   3. Bucket hunks by canonical (post-rename) path.
+//!   2. Walk commits in order, tracking file identity per live path: a
+//!      rename moves the identity to the new path, a full delete retires
+//!      it. A path reused after a rename/delete starts a fresh file.
+//!   3. Bucket hunks by file identity; emit under its final path.
 //!   4. Per path: replay hunks in commit order. Each commit's hunks are
 //!      applied together via the standard `old_file → new_file` merge —
 //!      copy pre-hunk region, skip `old_len` deleted lines, emit `new_len`
@@ -15,7 +16,6 @@
 //!   5. INSERT the final Vec<(sha, bucket)> as `line_births`.
 //!
 //! v1 caveats (per SPEC "What we do NOT test"):
-//! - Rename chain is a single hop per rewrite event; deeper chains drift.
 //! - Merges are skipped, matching the rest of the indexer's non-merge
 //!   sampling — cross-branch content only shows up when it lands via a
 //!   non-merge commit.
@@ -37,31 +37,30 @@ struct HunkRow {
     prev_path: Option<String>,
     old_start: i32,
     old_len: i32,
+    new_start: i32,
     new_len: i32,
 }
 
-pub fn fold_and_materialize(cache: &mut Cache) -> Result<()> {
-    let hunks = load_hunks(cache).context("loading hunks for cohort fold")?;
-    if hunks.is_empty() {
-        return Ok(());
+impl HunkRow {
+    /// Whole-file deletion: the churn producer emits new_start = 0 only
+    /// for deleted files (content hunks are 1-based).
+    fn is_file_delete(&self) -> bool {
+        self.prev_path.is_none() && self.new_start == 0 && self.new_len == 0 && self.old_len > 0
     }
 
-    // Alias map — later renames win. `resolve` chases until stable.
-    let mut alias: HashMap<String, String> = HashMap::new();
-    for h in &hunks {
-        if let Some(pp) = &h.prev_path {
-            if !pp.is_empty() && pp != &h.path {
-                alias.insert(pp.clone(), h.path.clone());
-            }
-        }
+    fn rename_source(&self) -> Option<&str> {
+        self.prev_path
+            .as_deref()
+            .filter(|pp| !pp.is_empty() && *pp != self.path)
     }
+}
 
-    // Group hunks by canonical (post-rename) path.
-    let mut by_path: HashMap<String, Vec<HunkRow>> = HashMap::new();
-    for h in hunks {
-        let key = resolve(&alias, &h.path);
-        by_path.entry(key).or_default().push(h);
-    }
+/// `on_head`: shas reachable from HEAD. `line_births` describes HEAD's
+/// files, so hunks from unmerged branches are excluded.
+pub fn fold_and_materialize(cache: &mut Cache, on_head: &HashSet<String>) -> Result<()> {
+    let mut hunks = load_hunks(cache).context("loading hunks for cohort fold")?;
+    hunks.retain(|h| on_head.contains(&h.sha));
+    let by_file = group_by_file(&hunks);
 
     // Rebuild line_births from scratch — Phase 3 always full-rebuild.
     // Incremental is v1.x.
@@ -69,7 +68,7 @@ pub fn fold_and_materialize(cache: &mut Cache) -> Result<()> {
 
     // Fold each file in parallel. Files are independent — the whole point
     // of splitting Phase 2 by canonical path (SPEC §Indexing pipeline).
-    let folded: Vec<(String, Vec<(String, i64)>)> = by_path
+    let folded: Vec<(String, Vec<(String, i64)>)> = by_file
         .into_par_iter()
         .map(|(path, hunks)| (path, fold_file(&hunks)))
         .collect();
@@ -95,7 +94,7 @@ fn load_hunks(cache: &Cache) -> Result<Vec<HunkRow>> {
     let mut stmt = cache.conn.prepare(
         "SELECT h.sha, c.bucket_key,
                 h.path, h.prev_path,
-                h.old_start, h.old_len, h.new_len
+                h.old_start, h.old_len, h.new_start, h.new_len
          FROM   hunks h
          JOIN   commits c ON c.sha = h.sha
          WHERE  c.is_merge = FALSE
@@ -109,32 +108,73 @@ fn load_hunks(cache: &Cache) -> Result<Vec<HunkRow>> {
             prev_path: r.get::<_, Option<String>>(3)?,
             old_start: r.get(4)?,
             old_len: r.get(5)?,
-            new_len: r.get(6)?,
+            new_start: r.get(6)?,
+            new_len: r.get(7)?,
         })
     })?;
     Ok(iter.collect::<duckdb::Result<Vec<_>>>()?)
 }
 
-fn resolve(alias: &HashMap<String, String>, p: &str) -> String {
-    let mut cur = p.to_string();
-    let mut seen: HashSet<String> = HashSet::new();
-    while let Some(nxt) = alias.get(&cur) {
-        if !seen.insert(cur.clone()) {
-            break; // cycle guard
-        }
-        cur = nxt.clone();
+/// Group hunks (sorted by commit order) into files, tracking identity
+/// chronologically so renames follow the file and reused paths don't
+/// inherit a predecessor's history. Returns only files live at the end,
+/// keyed by final path.
+fn group_by_file(hunks: &[HunkRow]) -> Vec<(String, Vec<&HunkRow>)> {
+    let mut live: HashMap<&str, usize> = HashMap::new();
+    let mut files: Vec<(&str, Vec<&HunkRow>)> = Vec::new();
+    fn new_file<'a>(files: &mut Vec<(&'a str, Vec<&'a HunkRow>)>, path: &'a str) -> usize {
+        files.push((path, Vec::new()));
+        files.len() - 1
     }
-    cur
+
+    for commit in hunks.chunk_by(|a, b| a.sha == b.sha) {
+        // Detach every rename source before attaching any target, so a
+        // swap (a→b, b→a) in one commit moves both identities correctly.
+        let mut moved: Vec<(&str, Option<usize>)> = Vec::new();
+        for h in commit {
+            if let Some(src) = h.rename_source() {
+                if !moved.iter().any(|(p, _)| *p == h.path) {
+                    moved.push((&h.path, live.remove(src)));
+                }
+            }
+        }
+        for (path, id) in moved {
+            let id = id.unwrap_or_else(|| new_file(&mut files, path));
+            files[id].0 = path;
+            live.insert(path, id);
+        }
+        for h in commit {
+            let id = match live.get(h.path.as_str()) {
+                Some(&id) => id,
+                None => {
+                    let id = new_file(&mut files, &h.path);
+                    live.insert(&h.path, id);
+                    id
+                }
+            };
+            files[id].1.push(h);
+        }
+        for h in commit.iter().filter(|h| h.is_file_delete()) {
+            live.remove(h.path.as_str());
+        }
+    }
+
+    live.into_values()
+        .map(|id| {
+            let (path, hs) = std::mem::take(&mut files[id]);
+            (path.to_string(), hs)
+        })
+        .collect()
 }
 
 /// Fold every hunk touching this canonical path into a Vec<(sha, bucket)>.
 /// Groups by commit sha (preserving global commit order), then applies each
 /// commit's hunks via `apply_commit`.
-fn fold_file(hunks: &[HunkRow]) -> Vec<(String, i64)> {
+fn fold_file(hunks: &[&HunkRow]) -> Vec<(String, i64)> {
     // Group consecutive same-sha hunks together while preserving the outer
     // commit order (already sorted by authored_at, sha).
     let mut groups: Vec<(String, i64, Vec<&HunkRow>)> = Vec::new();
-    for h in hunks {
+    for &h in hunks {
         if let Some((last_sha, _, group)) = groups.last_mut() {
             if last_sha == &h.sha {
                 group.push(h);
@@ -204,7 +244,7 @@ fn apply_commit(
 mod tests {
     use super::*;
 
-    fn mk(sha: &str, bucket: i64, path: &str, os: i32, ol: i32, _ns: i32, nl: i32) -> HunkRow {
+    fn mk(sha: &str, bucket: i64, path: &str, os: i32, ol: i32, ns: i32, nl: i32) -> HunkRow {
         HunkRow {
             sha: sha.to_string(),
             bucket_key: bucket,
@@ -212,15 +252,35 @@ mod tests {
             prev_path: None,
             old_start: os,
             old_len: ol,
+            new_start: ns,
             new_len: nl,
         }
+    }
+
+    fn renamed(mut h: HunkRow, from: &str) -> HunkRow {
+        h.prev_path = Some(from.to_string());
+        h
+    }
+
+    fn fold(hunks: &[HunkRow]) -> Vec<(String, i64)> {
+        fold_file(&hunks.iter().collect::<Vec<_>>())
+    }
+
+    /// Final path → birth shas, sorted by path.
+    fn files(hunks: &[HunkRow]) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<_> = group_by_file(hunks)
+            .into_iter()
+            .map(|(p, hs)| (p, fold_file(&hs).into_iter().map(|(s, _)| s).collect()))
+            .collect();
+        out.sort();
+        out
     }
 
     #[test]
     fn addition_only_births_all_from_first_sha() {
         // Commit A: add 3 lines.
         let h = vec![mk("A", 100, "f", 0, 0, 1, 3)];
-        let state = fold_file(&h);
+        let state = fold(&h);
         assert_eq!(state.len(), 3);
         for (sha, bucket) in &state {
             assert_eq!(sha, "A");
@@ -232,7 +292,7 @@ mod tests {
     fn subsequent_modification_updates_birth_of_new_lines_only() {
         // A: add 4 lines. B: replace line 2 with 2 new lines.
         let hunks = vec![mk("A", 100, "f", 0, 0, 1, 4), mk("B", 200, "f", 2, 1, 2, 2)];
-        let state = fold_file(&hunks);
+        let state = fold(&hunks);
         // Result: [A, B, B, A, A]  (line1=A, lines2-3=B, lines4-5=A originals 3+4)
         assert_eq!(state.len(), 5);
         assert_eq!(state[0].0, "A");
@@ -245,36 +305,88 @@ mod tests {
     #[test]
     fn full_delete_leaves_empty_state() {
         let hunks = vec![mk("A", 100, "f", 0, 0, 1, 5), mk("B", 200, "f", 1, 5, 0, 0)];
-        let state = fold_file(&hunks);
+        let state = fold(&hunks);
         assert!(state.is_empty());
     }
 
     #[test]
-    fn rename_alias_collapses_history() {
-        let alias: HashMap<String, String> = [("old.rs".to_string(), "new.rs".to_string())].into();
-        assert_eq!(resolve(&alias, "old.rs"), "new.rs");
-        assert_eq!(resolve(&alias, "new.rs"), "new.rs");
+    fn rename_follows_history() {
+        let h = vec![
+            mk("A", 1, "old", 0, 0, 1, 2),
+            renamed(mk("B", 2, "new", 0, 0, 0, 0), "old"),
+            mk("C", 3, "new", 3, 0, 3, 1),
+        ];
+        assert_eq!(
+            files(&h),
+            vec![("new".into(), vec!["A".into(), "A".into(), "C".into()])]
+        );
     }
 
     #[test]
     fn rename_chain_two_hops() {
-        let alias: HashMap<String, String> = [
-            ("a".to_string(), "b".to_string()),
-            ("b".to_string(), "c".to_string()),
-        ]
-        .into();
-        assert_eq!(resolve(&alias, "a"), "c");
+        let h = vec![
+            mk("A", 1, "a", 0, 0, 1, 1),
+            renamed(mk("B", 2, "b", 0, 0, 0, 0), "a"),
+            renamed(mk("C", 3, "c", 0, 0, 0, 0), "b"),
+        ];
+        assert_eq!(files(&h), vec![("c".into(), vec!["A".into()])]);
     }
 
     #[test]
-    fn rename_cycle_bails() {
-        let alias: HashMap<String, String> = [
-            ("a".to_string(), "b".to_string()),
-            ("b".to_string(), "a".to_string()),
-        ]
-        .into();
-        // Should not infinite-loop.
-        let _ = resolve(&alias, "a");
+    fn path_reused_after_rename_is_a_new_file() {
+        // A: create f (2 lines). B: f → g. C: new f (1 line).
+        let h = vec![
+            mk("A", 1, "f", 0, 0, 1, 2),
+            renamed(mk("B", 2, "g", 0, 0, 0, 0), "f"),
+            mk("C", 3, "f", 0, 0, 1, 1),
+        ];
+        assert_eq!(
+            files(&h),
+            vec![
+                ("f".into(), vec!["C".into()]),
+                ("g".into(), vec!["A".into(), "A".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_and_recreate_in_same_commit() {
+        // B moves f → g and adds a fresh f in one commit.
+        let h = vec![
+            mk("A", 1, "f", 0, 0, 1, 1),
+            mk("B", 2, "f", 0, 0, 1, 3),
+            renamed(mk("B", 2, "g", 0, 0, 0, 0), "f"),
+        ];
+        assert_eq!(
+            files(&h),
+            vec![
+                ("f".into(), vec!["B".into(), "B".into(), "B".into()]),
+                ("g".into(), vec!["A".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn swap_in_one_commit() {
+        let h = vec![
+            mk("A", 1, "a", 0, 0, 1, 1),
+            mk("A", 1, "b", 0, 0, 1, 2),
+            renamed(mk("B", 2, "a", 0, 0, 0, 0), "b"),
+            renamed(mk("B", 2, "b", 0, 0, 0, 0), "a"),
+        ];
+        assert_eq!(
+            files(&h),
+            vec![
+                ("a".into(), vec!["A".into(), "A".into()]),
+                ("b".into(), vec!["A".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn deleted_file_is_dropped() {
+        let h = vec![mk("A", 1, "f", 0, 0, 1, 2), mk("B", 2, "f", 1, 2, 0, 0)];
+        assert!(files(&h).is_empty());
     }
 
     #[test]
@@ -286,7 +398,7 @@ mod tests {
             mk("B", 200, "f", 2, 1, 2, 1),
             mk("B", 200, "f", 5, 1, 5, 1),
         ];
-        let state = fold_file(&hunks);
+        let state = fold(&hunks);
         // Result: [A, B, A, A, B, A]  (lines 2 and 5 replaced)
         assert_eq!(state.len(), 6);
         assert_eq!(state[0].0, "A");

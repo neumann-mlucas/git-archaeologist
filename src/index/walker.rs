@@ -90,9 +90,11 @@ pub fn walk(repo: &Repo, ignore_revs: &HashSet<String>) -> Result<Vec<CommitInfo
     Ok(out)
 }
 
-/// Collect every reachable commit-id from local refs (heads + tags). Uses
-/// only local refs — a bare inspection of the current worktree, matching
-/// `git rev-list --branches --tags`.
+/// Commit tips of every ref (`rev-list --all`, SPEC §Indexing pipeline),
+/// minus `refs/stash` and `refs/notes/*` — their commits are not project
+/// history (stash = WIP merge commits, notes = trees of note blobs).
+/// Refs that peel to a non-commit (e.g. a tag on a tree) are skipped; a
+/// tree tip would abort the rev walk.
 fn ref_tips(repo: &Repo) -> Result<Vec<gix::ObjectId>> {
     let mut seen: HashSet<gix::ObjectId> = HashSet::new();
     let mut out = Vec::new();
@@ -108,11 +110,19 @@ fn ref_tips(repo: &Repo) -> Result<Vec<gix::ObjectId>> {
     let refs = repo.git.references().context("opening ref platform")?;
     for res in refs.all().context("iterating all refs")? {
         let Ok(mut r) = res else { continue };
+        let name = r.name().as_bstr();
+        if name == "refs/stash" || name.starts_with(b"refs/notes/") {
+            continue;
+        }
         let Ok(id) = r.peel_to_id_in_place() else {
             continue;
         };
         let id = id.detach();
-        if seen.insert(id) {
+        let is_commit = repo
+            .git
+            .find_header(id)
+            .is_ok_and(|h| h.kind() == gix::object::Kind::Commit);
+        if is_commit && seen.insert(id) {
             out.push(id);
         }
     }

@@ -144,8 +144,8 @@ fn scenario_rename_chain() {
     );
 
     // Two rename links recorded in hunks (a->b, b->c).
-    let renames = env
-        .sql_i64("SELECT COUNT(DISTINCT prev_path) FROM hunks WHERE prev_path IS NOT NULL");
+    let renames =
+        env.sql_i64("SELECT COUNT(DISTINCT prev_path) FROM hunks WHERE prev_path IS NOT NULL");
     assert_eq!(renames, 2, "expected 2 distinct rename prev_path entries");
 }
 
@@ -226,4 +226,140 @@ fn scenario_cohort_survival() {
     // Total line_births rows = 5 (only surviving-line rows are materialized).
     let total = env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path='f.txt'");
     assert_eq!(total, 5, "expected 5 total line_births for f.txt");
+}
+
+/// Raw git in the scenario repo with a fixed identity and date.
+fn git_at(env: &Env, date: &str, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(&env.repo)
+        .env("GIT_AUTHOR_NAME", "Bob")
+        .env("GIT_AUTHOR_EMAIL", "bob@example.com")
+        .env("GIT_COMMITTER_NAME", "Bob")
+        .env("GIT_COMMITTER_EMAIL", "bob@example.com")
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// Ref scope: an unmerged branch is indexed (commits + churn) but kept out
+/// of HEAD's cohort; stash and notes commits are not history at all.
+#[test]
+fn scenario_ref_scope() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    dsl::build(
+        &env.repo,
+        &[
+            Action::commit(
+                "Alice",
+                "2025-01-01T00:00:00Z",
+                "feat: a",
+                &[("a.txt", "1\n2\n")],
+            ),
+            Action::commit(
+                "Alice",
+                "2025-01-02T00:00:00Z",
+                "feat: b",
+                &[("b.txt", "1\n")],
+            ),
+        ],
+    );
+    let head = git_at(&env, "2025-01-02T00:00:00Z", &["rev-parse", "HEAD"]);
+    // Newer commit on an unmerged branch.
+    git_at(
+        &env,
+        "2025-01-03T00:00:00Z",
+        &["checkout", "-q", "-b", "side"],
+    );
+    std::fs::write(env.repo.join("side.txt"), "s1\ns2\ns3\n").unwrap();
+    git_at(&env, "2025-01-03T00:00:00Z", &["add", "side.txt"]);
+    git_at(
+        &env,
+        "2025-01-03T00:00:00Z",
+        &["commit", "-q", "-m", "feat: side"],
+    );
+    git_at(&env, "2025-01-03T00:00:00Z", &["checkout", "-q", "main"]);
+    // Stash (2 commits) + note (1 commit) — neither may be indexed.
+    std::fs::write(env.repo.join("a.txt"), "wip\n").unwrap();
+    git_at(&env, "2025-01-04T00:00:00Z", &["stash", "-q"]);
+    git_at(
+        &env,
+        "2025-01-04T00:00:00Z",
+        &["notes", "add", "-m", "note", "HEAD"],
+    );
+
+    env.arch_stdout(&["index"]);
+
+    assert_eq!(env.sql_i64("SELECT COUNT(*) FROM commits"), 3);
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM file_churn WHERE path = 'side.txt'"),
+        1,
+        "side-branch commit must get churn like every other commit"
+    );
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path = 'side.txt'"),
+        0,
+        "unmerged branch must not leak into HEAD's cohort"
+    );
+    assert_eq!(env.sql_i64("SELECT COUNT(*) FROM line_births"), 3);
+    let indexed = env.arch_stdout(&[
+        "sql",
+        "SELECT value FROM meta WHERE key = 'indexed_head_sha'",
+    ]);
+    assert_eq!(indexed.lines().nth(1), Some(head.as_str()));
+}
+
+/// f.rs → g.rs, then a brand-new f.rs: the new file must not inherit the
+/// renamed file's history (and vice versa).
+#[test]
+fn scenario_path_reused_after_rename() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    dsl::build(
+        &env.repo,
+        &[
+            Action::commit(
+                "Alice",
+                "2025-01-01T00:00:00Z",
+                "feat: f",
+                &[("f.rs", "fn a() {}\nfn b() {}\nfn c() {}\n")],
+            ),
+            Action::rename(
+                "Alice",
+                "2025-01-02T00:00:00Z",
+                "refactor: f -> g",
+                "f.rs",
+                "g.rs",
+            ),
+            Action::commit(
+                "Alice",
+                "2025-01-03T00:00:00Z",
+                "feat: new f",
+                &[("f.rs", "fn z() {}\n")],
+            ),
+        ],
+    );
+    env.arch_stdout(&["index"]);
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path = 'g.rs'"),
+        3
+    );
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path = 'f.rs'"),
+        1
+    );
 }
