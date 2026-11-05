@@ -213,12 +213,12 @@ pub fn churn(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
         ),
         "author" => format!(
             "SELECT c.bucket_key                                    AS bucket,
-                    au.canonical_name                               AS author,
+                    a.canonical_name                                AS author,
                     SUM(fc.added)                                   AS added,
                     SUM(fc.deleted)                                 AS deleted
              FROM   file_churn fc
              JOIN   commits    c  ON c.sha = fc.sha
-             JOIN   authors    au ON au.id = c.author_id
+             JOIN   authors    a  ON a.id = c.author_id
              WHERE  c.is_merge = FALSE {filter} {path_filter}
              GROUP  BY bucket, author
              ORDER  BY bucket, added DESC"
@@ -261,11 +261,11 @@ pub fn burndown(cache: &Cache, filters: &Filters, by: &str) -> Result<Table> {
             format!(
                 "WITH per_bucket AS (
                      SELECT c.bucket_key         AS bucket,
-                            au.canonical_name    AS author,
+                            a.canonical_name     AS author,
                             SUM(fc.added) - SUM(fc.deleted) AS net
                      FROM   file_churn fc
                      JOIN   commits c  ON c.sha = fc.sha
-                     JOIN   authors au ON au.id = c.author_id
+                     JOIN   authors a  ON a.id = c.author_id
                      WHERE  c.is_merge = FALSE {filter} {path_fc}
                      GROUP  BY bucket, author
                  )

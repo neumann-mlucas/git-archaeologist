@@ -498,6 +498,18 @@ fn tier1_golden_integration() {
             "burndown-author",
             vec!["burndown", "--by", "author", "--format", "tsv"],
         ),
+        (
+            "burndown-author-filtered",
+            vec![
+                "burndown", "--by", "author", "--author", "alice", "--format", "tsv",
+            ],
+        ),
+        (
+            "churn-author-filtered",
+            vec![
+                "churn", "--by", "author", "--author", "alice", "--format", "tsv",
+            ],
+        ),
         ("classify", vec!["classify", "--format", "tsv"]),
         (
             "churn-module",
