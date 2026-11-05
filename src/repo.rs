@@ -1,4 +1,3 @@
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -43,9 +42,9 @@ impl Repo {
 fn cache_key(root: &Path) -> String {
     let canonical = root.to_string_lossy();
     let name = root.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    h.write(canonical.as_bytes());
-    let hash = h.finish();
+    // xxh64, not DefaultHasher — std's hasher may change across Rust
+    // releases, which would silently orphan every cache.
+    let hash = xxhash_rust::xxh64::xxh64(canonical.as_bytes(), 0);
     format!("{name}-{hash:016x}")
 }
 
