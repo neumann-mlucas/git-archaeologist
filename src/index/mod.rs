@@ -38,15 +38,14 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     // even when the override didn't ask for `Tag`. If the user asked for
     // `Tag` but no reachable tags exist, degrade to auto so downstream
     // metrics still work.
-    let tag_dates: Vec<i64> = {
-        let mut v: Vec<i64> = walker::tags(repo)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|t| t.tagged_at)
-            .collect();
-        v.sort_unstable();
-        v
-    };
+    // One tag walk feeds both bucketing and the `tags` table. A broken ref
+    // store shouldn't block indexing, but it must not pass silently.
+    let tag_infos = walker::tags(repo).unwrap_or_else(|e| {
+        eprintln!("warning: reading tags failed, indexing without tags: {e:#}");
+        Vec::new()
+    });
+    let mut tag_dates: Vec<i64> = tag_infos.iter().map(|t| t.tagged_at).collect();
+    tag_dates.sort_unstable();
     if size == BucketSize::Tag && tag_dates.is_empty() {
         eprintln!("bucket=tag requested but repo has no tags; falling back to auto");
         size = bucket::auto(all_commits.len());
@@ -84,6 +83,7 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     // chunk edge amortizes the round-trips against INDEX_CHUNK rows.
     // Peak Appender buffer = one chunk's worth, already the RSS bound.
 
+    let mut diff_failures: Vec<(String, String)> = Vec::new();
     let mut last_progress_at = std::time::Instant::now();
     let progress_interval = std::time::Duration::from_millis(100);
 
@@ -105,10 +105,6 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
          DROP INDEX IF EXISTS idx_line_births_bucket;
          DROP INDEX IF EXISTS idx_line_births_path;",
     )?;
-
-    // Tags — inserted after commits so the FK target is present. Reuse
-    // the list we already walked for tag-bucket assignment.
-    let tag_infos = walker::tags(repo).unwrap_or_default();
 
     // Everything write-heavy goes through Appender. Under `--force-full`
     // we wiped the tables above; on incremental runs, `already` filters
@@ -163,7 +159,8 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
                 )
             })
             .collect();
-        let mut churn_map = churn::process_jobs(repo, &chunk_jobs);
+        let (mut churn_map, failed) = churn::process_jobs(repo, &chunk_jobs);
+        diff_failures.extend(failed);
         let sampled_shas: Vec<String> = window
             .iter()
             .filter_map(|(_, (commit, plan))| {
@@ -287,6 +284,12 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         // windows.
     }
     eprintln!();
+    if let Some((sha, err)) = diff_failures.first() {
+        eprintln!(
+            "warning: {} commit(s) failed to diff and have no churn/hunks (first: {sha}: {err})",
+            diff_failures.len()
+        );
+    }
 
     // Final flush + drop appenders before any query/DDL touches these
     // tables. Appender::drop calls flush(), but calling explicitly keeps
@@ -393,7 +396,9 @@ fn wipe_data(cache: &Cache) -> Result<()> {
          DELETE FROM tags;
          DELETE FROM commit_trailers;
          DELETE FROM commit_parents;
-         DELETE FROM commits;",
+         DELETE FROM commits;
+         DELETE FROM author_aliases;
+         DELETE FROM authors;",
     )?;
     Ok(())
 }

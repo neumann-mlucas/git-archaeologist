@@ -99,6 +99,12 @@ pub struct ConvCommit {
 pub fn parse_conv_commit(msg: &str) -> ConvCommit {
     let subject = msg.lines().next().unwrap_or("").trim();
 
+    // Conventional Commits footer; counts even on an untyped subject.
+    let footer_breaking = msg
+        .lines()
+        .skip(1)
+        .any(|l| l.starts_with("BREAKING CHANGE:") || l.starts_with("BREAKING-CHANGE:"));
+
     // Git's own "Revert ..." subject line.
     let is_revert_prefix = subject.starts_with("Revert \"") || subject.starts_with("Revert '");
 
@@ -107,7 +113,7 @@ pub fn parse_conv_commit(msg: &str) -> ConvCommit {
         None => {
             return ConvCommit {
                 msg_type: None,
-                is_breaking: false,
+                is_breaking: footer_breaking,
                 is_revert: is_revert_prefix,
             };
         }
@@ -128,14 +134,14 @@ pub fn parse_conv_commit(msg: &str) -> ConvCommit {
     if msg_type.is_empty() || !msg_type.chars().all(|c| c.is_ascii_alphabetic()) {
         return ConvCommit {
             msg_type: None,
-            is_breaking: false,
+            is_breaking: footer_breaking,
             is_revert: is_revert_prefix,
         };
     }
     let is_revert = is_revert_prefix || msg_type.eq_ignore_ascii_case("revert");
     ConvCommit {
         msg_type: Some(msg_type.to_ascii_lowercase()),
-        is_breaking,
+        is_breaking: is_breaking || footer_breaking,
         is_revert,
     }
 }
@@ -233,6 +239,16 @@ mod tests {
         let c = parse_conv_commit("Revert \"feat: bad thing\"");
         assert!(c.is_revert);
         assert!(c.msg_type.is_none());
+    }
+
+    #[test]
+    fn conv_commit_breaking_footer() {
+        let c = parse_conv_commit("feat: x\n\nBREAKING CHANGE: drops v1 API");
+        assert!(c.is_breaking);
+        let c = parse_conv_commit("rework parser\n\nBREAKING-CHANGE: new grammar");
+        assert!(c.is_breaking && c.msg_type.is_none());
+        // Subject line is not a footer.
+        assert!(!parse_conv_commit("BREAKING CHANGE: subject").is_breaking);
     }
 
     #[test]

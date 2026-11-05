@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gix::bstr::ByteSlice;
 use gix::diff::Rewrites;
 use imara_diff::intern::InternedInput;
@@ -53,12 +53,15 @@ const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 /// Run the diff over a slice of jobs. Each rayon worker opens its own
 /// `gix::Repository` via `map_init` — gix::Repository is `!Sync` but
 /// re-opening the same `.git/` from N threads is safe.
+///
+/// Commits whose diff fails come back in the error list (sha, message)
+/// instead of silently yielding empty churn.
 pub fn process_jobs(
     repo: &Repo,
     jobs: &[(String, Option<gix::ObjectId>)],
-) -> HashMap<String, CommitDiff> {
+) -> (HashMap<String, CommitDiff>, Vec<(String, String)>) {
     let git_dir: PathBuf = repo.git.path().to_path_buf();
-    let results: Vec<(String, CommitDiff)> = jobs
+    let results: Vec<(String, Result<CommitDiff>)> = jobs
         .par_iter()
         .map_init(
             || {
@@ -68,46 +71,60 @@ pub fn process_jobs(
                 )
             },
             |(worker_git, reg), (sha, parent_id)| {
-                let mut diff = diff_one(worker_git, sha, parent_id.as_ref());
-                for c in &mut diff.churn {
-                    c.language = reg.label_for(&c.path);
-                }
+                let diff = diff_one(worker_git, sha, parent_id.as_ref()).map(|mut d| {
+                    for c in &mut d.churn {
+                        c.language = reg.label_for(&c.path);
+                    }
+                    d
+                });
                 (sha.clone(), diff)
             },
         )
         .collect();
-    results.into_iter().collect()
+    let mut ok = HashMap::with_capacity(results.len());
+    let mut failed = Vec::new();
+    for (sha, r) in results {
+        match r {
+            Ok(d) => {
+                ok.insert(sha, d);
+            }
+            Err(e) => failed.push((sha, format!("{e:#}"))),
+        }
+    }
+    (ok, failed)
 }
 
 /// Compute the (hunks, churn) delta for a single commit against its
 /// first parent. Blob reads reuse the worker-local `gix::Repository`.
-fn diff_one(git: &gix::Repository, sha: &str, parent_id: Option<&gix::ObjectId>) -> CommitDiff {
+fn diff_one(
+    git: &gix::Repository,
+    sha: &str,
+    parent_id: Option<&gix::ObjectId>,
+) -> Result<CommitDiff> {
     let mut diff = CommitDiff::default();
 
-    let commit = match git.find_commit(gix::ObjectId::from_hex(sha.as_bytes()).unwrap()) {
-        Ok(c) => c,
-        Err(_) => return diff,
-    };
-    let tree = match commit.tree() {
-        Ok(t) => t,
-        Err(_) => return diff,
-    };
+    let oid = gix::ObjectId::from_hex(sha.as_bytes()).context("parsing sha")?;
+    let tree = git
+        .find_commit(oid)
+        .context("loading commit")?
+        .tree()
+        .context("loading tree")?;
+    // A parent missing from the odb (shallow boundary) diffs against the
+    // empty tree, i.e. the commit is treated as a root — startup already
+    // warned about shallow history.
     let empty_tree = git.empty_tree();
     let parent_tree_obj = parent_id
         .and_then(|pid| git.find_commit(*pid).ok())
         .and_then(|pc| pc.tree().ok());
     let parent_tree_ref = parent_tree_obj.as_ref().unwrap_or(&empty_tree);
 
-    let mut platform = match parent_tree_ref.changes() {
-        Ok(p) => p,
-        Err(_) => return diff,
-    };
+    let mut platform = parent_tree_ref.changes().context("starting tree diff")?;
     platform
         .track_path()
         .track_rewrites(Some(Rewrites::default()));
 
-    let _ =
-        platform.for_each_to_obtain_tree(
+    platform
+        .for_each_to_obtain_tree(
             &tree,
             |change| -> Result<
                 gix::object::tree::diff::Action,
@@ -116,9 +133,10 @@ fn diff_one(git: &gix::Repository, sha: &str, parent_id: Option<&gix::ObjectId>)
                 handle_change(git, change, &mut diff);
                 Ok(gix::object::tree::diff::Action::Continue)
             },
-        );
+        )
+        .context("diffing trees")?;
 
-    diff
+    Ok(diff)
 }
 
 fn handle_change<'a>(
