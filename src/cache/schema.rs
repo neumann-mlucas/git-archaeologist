@@ -1,7 +1,7 @@
 use anyhow::Result;
 use duckdb::Connection;
 
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -25,9 +25,6 @@ CREATE TABLE IF NOT EXISTS author_aliases (
     PRIMARY KEY (raw_name, raw_email)
 );
 
--- NOTE: SCHEMA_VERSION intentionally not bumped when `message` / `body_hash`
--- were added. Existing caches lacking these columns will error on next open;
--- run `git-archaeologist reindex` (or delete the cache dir) to rebuild.
 CREATE TABLE IF NOT EXISTS commits (
     sha           TEXT PRIMARY KEY,
     author_id     BIGINT NOT NULL,
