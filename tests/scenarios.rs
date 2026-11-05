@@ -493,3 +493,46 @@ fn scenario_locked_cache_is_not_wiped() {
         "cache was wiped"
     );
 }
+
+/// Incremental `index` landing a commit in an already-indexed bucket must
+/// leave one sampled commit per bucket, else `burndown --by language`
+/// sums two snapshots for that bucket.
+#[test]
+fn scenario_incremental_index_keeps_one_sample_per_bucket() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    let commit = |date: &str, body: &str| {
+        std::fs::write(env.repo.join("a.rs"), body).unwrap();
+        git_at(&env, date, &["add", "a.rs"]);
+        git_at(&env, date, &["commit", "-q", "-m", "feat: x"]);
+    };
+    git_at(&env, "2025-01-01T00:00:00Z", &["init", "-q", "-b", "main"]);
+    commit("2025-01-01T10:00:00Z", "fn a() {}\n");
+    env.arch_stdout(&["index", "--bucket", "day"]);
+    commit("2025-01-01T12:00:00Z", "fn a() {}\nfn b() {}\n");
+    env.arch_stdout(&["index", "--bucket", "day"]);
+
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM commits WHERE is_sampled"),
+        1
+    );
+    let out = env.arch_stdout(&["burndown", "--bucket", "day", "--format", "tsv"]);
+    let loc: Vec<&str> = out
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').nth(2).unwrap())
+        .collect();
+    assert_eq!(loc, ["2"]);
+
+    // Changing `--bucket` incrementally must match a fresh reindex.
+    let plan = "SELECT COUNT(*) FROM commits c JOIN file_stats fs USING (sha) \
+                WHERE c.is_sampled AND c.bucket_key = 202501";
+    env.arch_stdout(&["index", "--bucket", "month"]);
+    let incremental = env.sql_i64(plan);
+    env.arch_stdout(&["reindex", "--bucket", "month"]);
+    assert_eq!(incremental, env.sql_i64(plan));
+    assert_eq!(incremental, 1);
+}

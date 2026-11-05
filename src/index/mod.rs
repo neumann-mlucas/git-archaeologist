@@ -55,11 +55,31 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         wipe_data(cache)?;
     }
 
-    let already: HashSet<String> = existing_shas(cache)?;
+    let stored = stored_plans(cache)?;
+    let already: HashSet<String> = stored.keys().cloned().collect();
 
     queries::set_meta(&cache.conn, "bucket_size", &format!("{size:?}"))?;
 
     let assignments = assign_buckets(&all_commits, size, &tag_dates);
+
+    // Incremental runs: a new commit can take over an indexed commit's
+    // "last in bucket" slot, and `--bucket` can change between runs. Old
+    // rows whose stored plan differs get re-keyed; demoted samples lose
+    // their snapshot, promoted ones are parsed below.
+    let mut stale: Vec<(&str, i64, bool)> = Vec::new();
+    let mut promote: HashSet<String> = HashSet::new();
+    if !opts.force_full {
+        for (c, plan) in all_commits.iter().zip(&assignments) {
+            if let Some(&(key, sampled)) = stored.get(&c.sha) {
+                if (key, sampled) != (plan.bucket_key, plan.is_sampled) {
+                    stale.push((&c.sha, plan.bucket_key, plan.is_sampled));
+                    if plan.is_sampled && !sampled {
+                        promote.insert(c.sha.clone());
+                    }
+                }
+            }
+        }
+    }
 
     let total = all_commits.len();
     let sampled_count = assignments.iter().filter(|a| a.is_sampled).count();
@@ -105,6 +125,23 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
          DROP INDEX IF EXISTS idx_line_births_bucket;
          DROP INDEX IF EXISTS idx_line_births_path;",
     )?;
+    if !stale.is_empty() {
+        cache.conn.execute_batch(
+            "CREATE OR REPLACE TEMP TABLE plan_fix (sha TEXT, bucket_key BIGINT, is_sampled BOOLEAN)",
+        )?;
+        let mut app = cache.conn.appender("plan_fix")?;
+        for (sha, key, sampled) in &stale {
+            app.append_row(params![sha, key, sampled])?;
+        }
+        drop(app);
+        cache.conn.execute_batch(
+            "DELETE FROM file_stats WHERE sha IN (SELECT sha FROM plan_fix WHERE NOT is_sampled);
+             DELETE FROM funcs      WHERE sha IN (SELECT sha FROM plan_fix WHERE NOT is_sampled);
+             UPDATE commits SET bucket_key = p.bucket_key, is_sampled = p.is_sampled
+             FROM plan_fix p WHERE commits.sha = p.sha;
+             DROP TABLE plan_fix;",
+        )?;
+    }
 
     // Everything write-heavy goes through Appender. Under `--force-full`
     // we wiped the tables above; on incremental runs, `already` filters
@@ -143,7 +180,10 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         .collect();
     for window in commit_pairs.chunks(INDEX_CHUNK) {
         let pending = |c: &CommitInfo| opts.force_full || !already.contains(&c.sha);
-        if !window.iter().any(|(_, (c, _))| pending(c)) {
+        if !window
+            .iter()
+            .any(|(_, (c, _))| pending(c) || promote.contains(&c.sha))
+        {
             continue;
         }
 
@@ -164,7 +204,7 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         let sampled_shas: Vec<String> = window
             .iter()
             .filter_map(|(_, (commit, plan))| {
-                if plan.is_sampled && !(already.contains(&commit.sha) && !opts.force_full) {
+                if plan.is_sampled && (pending(commit) || promote.contains(&commit.sha)) {
                     Some(commit.sha.clone())
                 } else {
                     None
@@ -174,7 +214,11 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         let mut snapshot_map = treesitter::batch_sampled(repo, &sampled_shas);
 
         for (i, (commit, plan)) in window {
-            if already.contains(&commit.sha) && !opts.force_full {
+            if !pending(commit) {
+                // Already indexed; only a promoted sample needs rows.
+                if let Some(files) = snapshot_map.remove(&commit.sha) {
+                    append_snapshot(&mut file_stats_app, &mut funcs_app, &commit.sha, files)?;
+                }
                 continue;
             }
 
@@ -227,27 +271,7 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
 
             if plan.is_sampled {
                 if let Some(files) = snapshot_map.remove(&commit.sha) {
-                    for f in files {
-                        file_stats_app.append_row(params![
-                            commit.sha,
-                            f.stat.path,
-                            f.stat.language,
-                            f.stat.code,
-                            f.stat.comments,
-                            f.stat.blanks
-                        ])?;
-                        for def in f.funcs {
-                            funcs_app.append_row(params![
-                                commit.sha,
-                                f.stat.path,
-                                def.name,
-                                def.kind,
-                                def.start_line,
-                                def.end_line,
-                                def.body_hash as i64,
-                            ])?;
-                        }
-                    }
+                    append_snapshot(&mut file_stats_app, &mut funcs_app, &commit.sha, files)?;
                 }
             }
 
@@ -403,10 +427,43 @@ fn wipe_data(cache: &Cache) -> Result<()> {
     Ok(())
 }
 
-fn existing_shas(cache: &Cache) -> Result<HashSet<String>> {
-    let mut stmt = cache.conn.prepare("SELECT sha FROM commits")?;
-    let iter = stmt.query_map([], |r| r.get::<_, String>(0))?;
+/// sha → (bucket_key, is_sampled) for every indexed commit.
+fn stored_plans(cache: &Cache) -> Result<std::collections::HashMap<String, (i64, bool)>> {
+    let mut stmt = cache
+        .conn
+        .prepare("SELECT sha, bucket_key, is_sampled FROM commits")?;
+    let iter = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
     Ok(iter.collect::<duckdb::Result<_>>()?)
+}
+
+fn append_snapshot(
+    file_stats_app: &mut duckdb::Appender,
+    funcs_app: &mut duckdb::Appender,
+    sha: &str,
+    files: Vec<treesitter::FileSnapshot>,
+) -> Result<()> {
+    for f in files {
+        file_stats_app.append_row(params![
+            sha,
+            f.stat.path,
+            f.stat.language,
+            f.stat.code,
+            f.stat.comments,
+            f.stat.blanks
+        ])?;
+        for def in f.funcs {
+            funcs_app.append_row(params![
+                sha,
+                f.stat.path,
+                def.name,
+                def.kind,
+                def.start_line,
+                def.end_line,
+                def.body_hash as i64,
+            ])?;
+        }
+    }
+    Ok(())
 }
 
 struct BucketAssignment {
