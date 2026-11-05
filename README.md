@@ -135,6 +135,26 @@ bucket   path                                 func              added  deleted  
 `--lang lua` on the same repo top-heavy on `test/functional/` — the Lua
 churn story lives in the test suite, not the core.
 
+### `stats`
+
+tokei-style snapshot of HEAD (parsed live, not the working tree), grouped
+`--by lang|dir|file` (default `lang`, `--depth N` for `dir`), with a
+`Total` row. Beyond line counts: function count + longest function,
+median age of surviving lines, top owner by surviving lines, 90-day churn.
+Files without a grammar show as `other` (lines only). Filters: `--lang`,
+`--path`. This repo:
+
+```
+lang     | files | lines | code | comments | blanks | funcs | max_func | median_age_days | owner          | owner_pct | churn_90d
+---------+-------+-------+------+----------+--------+-------+----------+-----------------+----------------+-----------+----------
+Rust     | 21    | 6878  | 5731 | 588      | 559    | 232   | 344      | 95              | neumann-mlucas | 100       | 1671     
+Markdown | 4     | 1999  | 1622 | 0        | 377    | 0     |          | 95              | neumann-mlucas | 100       | 119      
+Bash     | 1     | 366   | 298  | 39       | 29     | 3     | 9        | 95              | neumann-mlucas | 100       | 153      
+other    | 7     | 299   |      |          |        | 0     |          | 94              | neumann-mlucas | 100       | 5        
+JSON     | 1     | 14    | 14   | 0        | 0      | 0     |          | 94              | neumann-mlucas | 100       | 0        
+Total    | 34    | 9556  | 7665 | 627      | 965    | 235   | 344      | 95              | neumann-mlucas | 100       | 1948     
+```
+
 ### `age`
 
 File-age histogram, 7-day bins in raw output. Rolled up to 5 tiers
@@ -279,6 +299,7 @@ Subcommand-specific:
 - `survival --fit exp` — half-life scalar; returns NULL + `reason`
   column when < 100 deletion events.
 - `hotspot --top N --lang L` — `--lang` required.
+- `stats --by lang|dir|file --depth N` — HEAD snapshot; only `--lang`/`--path` filters.
 - `churn --depth N` (default 1) — path-segment granularity for
   `--by module`.
 

@@ -98,6 +98,22 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         depth: usize,
     },
+    /// tokei-style snapshot of HEAD: lines, code/comments/blanks, funcs,
+    /// line age, owner, 90-day churn per lang | dir | file.
+    Stats {
+        /// Grouping: lang | dir | file.
+        #[arg(long, default_value = "lang")]
+        by: String,
+        /// Directory depth for `--by dir`.
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, value_enum)]
+        format: Option<FormatArg>,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -274,6 +290,23 @@ fn main() -> Result<()> {
             let filters = build_filters(&q)?;
             let table = query::cohort(&cache, &filters)?;
             render_table(&table, FormatArg::resolve(q.format))
+        }
+        Cmd::Stats {
+            by,
+            depth,
+            lang,
+            path,
+            format,
+        } => {
+            if depth == 0 {
+                bail!("--depth must be >= 1");
+            }
+            ensure_indexed(&repo, &mut cache, cfg_bucket, false)?;
+            index::snapshot_head(&repo, &cache)?;
+            let filters =
+                query::Filters::parse(None, None, lang.as_deref(), None, path.as_deref())?;
+            let table = query::stats(&cache, &filters, &by, depth)?;
+            render_table(&table, FormatArg::resolve(format))
         }
         Cmd::Survival { q, fit } => {
             ensure_indexed(&repo, &mut cache, pick_bucket(&q, cfg_bucket), false)?;

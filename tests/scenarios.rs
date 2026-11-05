@@ -536,3 +536,50 @@ fn scenario_incremental_index_keeps_one_sample_per_bucket() {
     assert_eq!(incremental, env.sql_i64(plan));
     assert_eq!(incremental, 1);
 }
+
+/// `stats` counts HEAD's tree: per-language code/comment/blank split,
+/// grammar-less files as `other`, dir grouping, and a `Total` row.
+#[test]
+fn scenario_stats_snapshot() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(
+        &env,
+        &[
+            ("src/a.rs", "// c\nfn f() {\n    1;\n}\n\nfn g() {}\n"),
+            ("notes.txt", "x\ny\n"),
+        ],
+    );
+    env.arch_stdout(&["index"]);
+    let rows = |args: &[&str]| -> Vec<Vec<String>> {
+        let mut a = vec!["stats", "--format", "tsv"];
+        a.extend_from_slice(args);
+        env.arch_stdout(&a)
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').map(str::to_string).collect())
+            .collect()
+    };
+    // group, files, lines, code, comments, blanks, funcs
+    let lang = rows(&[]);
+    let head: Vec<Vec<&str>> = lang
+        .iter()
+        .map(|r| r[..7].iter().map(String::as_str).collect())
+        .collect();
+    assert_eq!(
+        head,
+        [
+            vec!["Rust", "1", "6", "4", "1", "1", "2"],
+            vec!["other", "1", "2", "", "", "", "0"],
+            vec!["Total", "2", "8", "4", "1", "1", "2"],
+        ]
+    );
+    let dirs: Vec<String> = rows(&["--by", "dir"])
+        .into_iter()
+        .map(|r| r[0].clone())
+        .collect();
+    assert_eq!(dirs, ["src", ".", "Total"]);
+}

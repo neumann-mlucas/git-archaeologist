@@ -427,6 +427,46 @@ fn wipe_data(cache: &Cache) -> Result<()> {
     Ok(())
 }
 
+/// Parse HEAD's tree live into temp tables `head_stats(path, language,
+/// code, comments, blanks)` and `head_funcs(path, start_line, end_line)`
+/// for `stats`. Sampled snapshots can trail HEAD, so they aren't reused.
+/// Warns when `line_births` (age/owner) was folded at a different HEAD.
+pub fn snapshot_head(repo: &Repo, cache: &Cache) -> Result<()> {
+    let head = repo.git.head_id().context("resolving HEAD")?.to_string();
+    let indexed: Option<String> = cache
+        .conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'indexed_head_sha'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if indexed.as_deref() != Some(head.as_str()) {
+        eprintln!(
+            "warning: cache indexed at a different HEAD; age/owner/churn are stale — run `index`"
+        );
+    }
+    cache.conn.execute_batch(
+        "CREATE OR REPLACE TEMP TABLE head_stats (path TEXT, language TEXT, code INTEGER, comments INTEGER, blanks INTEGER);
+         CREATE OR REPLACE TEMP TABLE head_funcs (path TEXT, start_line INTEGER, end_line INTEGER);",
+    )?;
+    let files = treesitter::batch_sampled(repo, std::slice::from_ref(&head))
+        .remove(&head)
+        .unwrap_or_default();
+    let mut stats = cache.conn.appender("head_stats")?;
+    let mut funcs = cache.conn.appender("head_funcs")?;
+    for f in files {
+        let s = &f.stat;
+        stats.append_row(params![s.path, s.language, s.code, s.comments, s.blanks])?;
+        for d in f.funcs {
+            funcs.append_row(params![s.path, d.start_line, d.end_line])?;
+        }
+    }
+    stats.flush()?;
+    funcs.flush()?;
+    Ok(())
+}
+
 /// sha → (bucket_key, is_sampled) for every indexed commit.
 fn stored_plans(cache: &Cache) -> Result<std::collections::HashMap<String, (i64, bool)>> {
     let mut stmt = cache

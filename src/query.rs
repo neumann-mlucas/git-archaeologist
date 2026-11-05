@@ -660,6 +660,96 @@ fn fit_half_life(table: &Table) -> Result<Table> {
     Ok(Table { headers, rows })
 }
 
+/// tokei-style snapshot of HEAD, grouped by language | dir | file, with a
+/// `Total` row. Needs `index::snapshot_head` temp tables. Files without a
+/// grammar count as language `other` (lines only, no code/comment split).
+///
+/// `lines`, `median_age_days`, `owner` come from `line_births` (surviving
+/// lines + birth commit); `churn_90d` = added + deleted in the last 90 days.
+pub fn stats(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result<Table> {
+    let key = match by {
+        "lang" | "language" => "language".to_string(),
+        "file" => "path".to_string(),
+        // Directory prefix, `depth` segments, filename excluded; root files → '.'.
+        "dir" => format!(
+            "COALESCE(NULLIF(array_to_string(list_slice(string_split(path, '/'), 1, \
+             LEAST({depth}, len(string_split(path, '/')) - 1)), '/'), ''), '.')"
+        ),
+        other => bail!("--by must be one of lang|dir|file, got {other:?}"),
+    };
+    let file_filter = format!(
+        "{}{}",
+        filters.path_where("path"),
+        filters.lang_where("language")
+    );
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let sql = format!(
+        "WITH files AS (
+             SELECT p.path, COALESCE(hs.language, 'other') AS language,
+                    hs.code, hs.comments, hs.blanks
+             FROM   (SELECT path FROM head_stats UNION SELECT DISTINCT path FROM line_births) p
+             LEFT   JOIN head_stats hs USING (path)
+         ),
+         keyed AS (
+             SELECT path, {key} AS g, code, comments, blanks
+             FROM   files
+             WHERE  1=1 {file_filter}
+         ),
+         lines AS (
+             SELECT k.g, c.author_id, ({now} - c.authored_at) / 86400.0 AS age
+             FROM   line_births lb
+             JOIN   keyed   k ON k.path = lb.path
+             JOIN   commits c ON c.sha  = lb.birth_sha
+         ),
+         f AS (
+             SELECT g, COUNT(*) AS files, SUM(code) AS code,
+                    SUM(comments) AS comments, SUM(blanks) AS blanks
+             FROM   keyed GROUP BY ROLLUP (g)
+         ),
+         l AS (
+             SELECT g, COUNT(*) AS lines, median(age) AS age
+             FROM   lines GROUP BY ROLLUP (g)
+         ),
+         o AS (
+             SELECT g, arg_max(author_id, n) AS owner, max(n) AS owner_n
+             FROM   (SELECT g, author_id, COUNT(*) AS n FROM lines
+                     GROUP BY GROUPING SETS ((g, author_id), (author_id)))
+             GROUP  BY g
+         ),
+         fn AS (
+             SELECT k.g, COUNT(*) AS funcs, MAX(hf.end_line - hf.start_line + 1) AS max_func
+             FROM   head_funcs hf JOIN keyed k USING (path)
+             GROUP  BY ROLLUP (k.g)
+         ),
+         ch AS (
+             SELECT k.g, SUM(fc.added + fc.deleted) AS churn
+             FROM   file_churn fc
+             JOIN   commits c ON c.sha  = fc.sha
+             JOIN   keyed   k ON k.path = fc.path
+             WHERE  c.is_merge = FALSE AND c.authored_at >= {now} - 90 * 86400
+             GROUP  BY ROLLUP (k.g)
+         )
+         SELECT COALESCE(f.g, 'Total')                        AS {by},
+                f.files                                       AS files,
+                COALESCE(l.lines, 0)                          AS lines,
+                f.code, f.comments, f.blanks,
+                COALESCE(fn.funcs, 0)                         AS funcs,
+                fn.max_func                                   AS max_func,
+                CAST(round(l.age) AS BIGINT)                  AS median_age_days,
+                a.canonical_name                              AS owner,
+                round(100.0 * o.owner_n / l.lines, 1)         AS owner_pct,
+                COALESCE(ch.churn, 0)                         AS churn_90d
+         FROM   f
+         LEFT   JOIN l  ON l.g  IS NOT DISTINCT FROM f.g
+         LEFT   JOIN o  ON o.g  IS NOT DISTINCT FROM f.g
+         LEFT   JOIN fn ON fn.g IS NOT DISTINCT FROM f.g
+         LEFT   JOIN ch ON ch.g IS NOT DISTINCT FROM f.g
+         LEFT   JOIN authors a ON a.id = o.owner
+         ORDER  BY f.g IS NULL, lines DESC, f.g",
+    );
+    run_sql(cache, &sql)
+}
+
 fn run_sql(cache: &Cache, sql: &str) -> Result<Table> {
     let mut stmt = cache.conn.prepare(sql)?;
     let mut rows_iter = stmt.query([])?;
