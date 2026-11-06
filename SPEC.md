@@ -413,6 +413,8 @@ across files.
 6. Group `hunks` by final (post-rename-follow) path.
 7. For each path, in parallel:
    - Walk the file's hunks in commit order along the first-parent chain.
+     (Today: all of HEAD's ancestry, parents before children, which drifts
+     on merges; see `known_drift_*` in `tests/scenarios.rs`.)
    - Maintain a `Vec<sha>` — birth commit per line. Apply each hunk:
      splice out `old_len` entries at `old_start`, splice in `new_len`
      copies of the current commit's sha at `new_start`.
@@ -422,7 +424,8 @@ across files.
 
 Progress reported via stderr every 100 ms (phase + percentage + eta).
 
-Incremental reindex: skip SHAs already in `commits`. Tail bucket may
+Incremental reindex: skip SHAs already in `commits`, and purge stored
+commits no ref reaches anymore (rebase, amend, deleted branch). Tail bucket may
 promote a newly-added commit to sampled — re-run tree-sitter for that
 single bucket only. Cohort fold reruns only for files whose hunk set
 changed (new commits touched them).

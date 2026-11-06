@@ -3,8 +3,8 @@
 //! birth_bucket)` row per surviving line.
 //!
 //! Algorithm (SPEC §Indexing pipeline, Phase 2):
-//!   1. Load every non-merge hunk joined with its commit's authored_at +
-//!      bucket_key.
+//!   1. Load every non-merge hunk joined with its commit's bucket_key, keep
+//!      HEAD's ancestry, and order it parents-before-children.
 //!   2. Walk commits in order, tracking file identity per live path: a
 //!      rename moves the identity to the new path, a full delete retires
 //!      it. A path reused after a rename/delete starts a fresh file.
@@ -18,7 +18,8 @@
 //! v1 caveats (per SPEC "What we do NOT test"):
 //! - Merges are skipped, matching the rest of the indexer's non-merge
 //!   sampling — cross-branch content only shows up when it lands via a
-//!   non-merge commit.
+//!   non-merge commit. Lines added in a merge are lost, and a rename on a
+//!   branch misses edits to the old path on main (`known_drift_*` tests).
 //! - Serial. Rayon parallelism across files is a v1.x perf follow-up.
 
 use std::collections::HashMap;
@@ -61,7 +62,7 @@ pub fn fold_and_materialize(cache: &mut Cache, order: &HashMap<String, usize>) -
     let mut hunks = load_hunks(cache).context("loading hunks for cohort fold")?;
     hunks.retain(|h| order.contains_key(&h.sha));
     // Stable: a commit's hunks stay sorted by old_start.
-    hunks.sort_by_key(|h| order[&h.sha]);
+    hunks.sort_by_cached_key(|h| order[&h.sha]);
     let by_file = group_by_file(&hunks);
 
     // Rebuild line_births from scratch — Phase 3 always full-rebuild.
@@ -100,7 +101,7 @@ fn load_hunks(cache: &Cache) -> Result<Vec<HunkRow>> {
          FROM   hunks h
          JOIN   commits c ON c.sha = h.sha
          WHERE  c.is_merge = FALSE
-         ORDER  BY h.sha ASC, h.old_start ASC",
+         ORDER  BY h.old_start ASC",
     )?;
     let iter = stmt.query_map([], |r| {
         Ok(HunkRow {
