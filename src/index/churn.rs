@@ -207,15 +207,12 @@ fn handle_change<'a>(
             id,
             previous_id,
         } => {
-            if !entry_mode.is_blob() || !previous_entry_mode.is_blob() {
+            let Some((old, new)) = text_pair(
+                git,
+                (previous_entry_mode, previous_id.detach()),
+                (entry_mode, id.detach()),
+            ) else {
                 return;
-            }
-            let (old, new) = match (
-                load_text_blob(git, previous_id.detach()),
-                load_text_blob(git, id.detach()),
-            ) {
-                (Some(o), Some(n)) => (o, n),
-                _ => return,
             };
             let (hunks, added, deleted) = diff_bytes(&old, &new);
             for h in hunks {
@@ -243,16 +240,13 @@ fn handle_change<'a>(
             id,
             ..
         } => {
-            if !entry_mode.is_blob() || !source_entry_mode.is_blob() {
-                return;
-            }
             let prev_path = source_location.to_str_lossy().into_owned();
-            let (old, new) = match (
-                load_text_blob(git, source_id.detach()),
-                load_text_blob(git, id.detach()),
-            ) {
-                (Some(o), Some(n)) => (o, n),
-                _ => return,
+            let Some((old, new)) = text_pair(
+                git,
+                (source_entry_mode, source_id.detach()),
+                (entry_mode, id.detach()),
+            ) else {
+                return;
             };
             let (hunks, added, deleted) = diff_bytes(&old, &new);
             if hunks.is_empty() {
@@ -285,6 +279,24 @@ fn handle_change<'a>(
                 language: None,
             });
         }
+    }
+}
+
+/// Both sides of a change as text. A side that isn't text (binary, too
+/// big, symlink, submodule) has no tracked lines, so it reads as empty:
+/// going text → binary deletes the file's lines, binary → text adds them.
+/// `None` when neither side is text.
+fn text_pair(
+    git: &gix::Repository,
+    old: (gix::object::tree::EntryMode, gix::ObjectId),
+    new: (gix::object::tree::EntryMode, gix::ObjectId),
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    let text = |(mode, id): (gix::object::tree::EntryMode, gix::ObjectId)| {
+        mode.is_blob().then(|| load_text_blob(git, id)).flatten()
+    };
+    match (text(old), text(new)) {
+        (None, None) => None,
+        (o, n) => Some((o.unwrap_or_default(), n.unwrap_or_default())),
     }
 }
 

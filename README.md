@@ -70,6 +70,11 @@ peaked around 2020 then shrank — a script-consolidation episode.
 Kaplan-Meier survival per birth cohort. `--fit exp` fits
 `ln(survival) = −λ·age` and returns a scalar half-life.
 
+Lines are tracked along HEAD's first-parent chain, so counts match HEAD
+exactly, and lines from a merged branch are born at the merge that landed
+them: `survival`, `cohort` and `stats` age/owner credit that commit, not the
+branch commit. Squash-merge histories are unaffected.
+
 ```
 half_life = 580.9 days   (n=650 buckets, 1,968,479 deletion events)
 ```

@@ -871,6 +871,39 @@ fn scenario_repeated_name_on_one_line_indexes() {
     );
 }
 
+/// A file leaving text (binary, over the size cap, symlink) loses its
+/// lines, and coming back adds them, instead of the fold keeping stale ones.
+#[test]
+fn scenario_text_to_non_text_transitions_match_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    let d = |n: u32| format!("2025-01-0{n}T00:00:00Z");
+    git_at(&env, &d(1), &["init", "-q", "-b", "main"]);
+    for f in ["binary.txt", "big.txt", "link.txt", "keep.txt"] {
+        std::fs::write(env.repo.join(f), format!("{f} 1\n{f} 2\n")).unwrap();
+    }
+    git_at(&env, &d(1), &["add", "-A"]);
+    git_at(&env, &d(1), &["commit", "-q", "-m", "feat: text"]);
+
+    std::fs::write(env.repo.join("binary.txt"), "a\0b\n").unwrap();
+    std::fs::write(env.repo.join("big.txt"), "big\n".repeat(600_000)).unwrap();
+    std::fs::remove_file(env.repo.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink("keep.txt", env.repo.join("link.txt")).unwrap();
+    git_at(&env, &d(2), &["add", "-A"]);
+    git_at(&env, &d(2), &["commit", "-q", "-m", "feat: not text"]);
+
+    std::fs::remove_file(env.repo.join("binary.txt")).unwrap();
+    std::fs::write(env.repo.join("big.txt"), "small\n").unwrap();
+    git_at(&env, &d(3), &["add", "-A"]);
+    git_at(&env, &d(3), &["commit", "-q", "-m", "feat: back"]);
+
+    env.arch_stdout(&["index"]);
+    env.assert_matches_git();
+}
+
 /// Main edits `a.txt` after a branch renamed it: the merge's diff against
 /// main carries the rename, so no ghost `a.txt` survives.
 #[test]
