@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -607,6 +607,9 @@ fn is_test_path(path: &str) -> bool {
 fn extract_funcs(source: &[u8], root: Node, spec: &LangSpec) -> Vec<FuncDef> {
     let mut out = Vec::new();
     walk_defs(source, root, spec, &mut out);
+    // Minified code repeats a name on one line; `funcs` keys on (name, line).
+    let mut seen = HashSet::new();
+    out.retain(|f: &FuncDef| seen.insert((f.name.clone(), f.start_line)));
     out
 }
 

@@ -838,6 +838,20 @@ fn scenario_age_buckets_floor() {
     );
 }
 
+/// Minified JS repeats a name on one line, which `funcs` can't key apart:
+/// `index` must keep one row instead of aborting on the primary key.
+#[test]
+fn scenario_repeated_name_on_one_line_indexes() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("m.js", "function t(){}function t(){}\n")]);
+    env.arch_stdout(&["index"]);
+    assert_eq!(env.sql_i64("SELECT COUNT(*) FROM funcs WHERE name = 't'"), 1);
+}
+
 /// Known drift: main edits `a.txt` after a branch renamed it, so the fold
 /// sees a new file at the old path and HEAD gains a ghost `a.txt`.
 #[test]
