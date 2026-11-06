@@ -542,44 +542,70 @@ fn render(headers: &[String], rows: &[Vec<String>], format: Format) -> Result<()
             }
             writeln!(out, "]")?;
         }
-        Format::Table => {
-            let widths: Vec<usize> = headers
-                .iter()
-                .enumerate()
-                .map(|(i, h)| {
-                    let cell = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
-                    h.len().max(cell)
-                })
-                .collect();
-            let sep = |o: &mut dyn std::io::Write| -> std::io::Result<()> {
-                for (i, w) in widths.iter().enumerate() {
-                    if i > 0 {
-                        write!(o, "-+-")?;
-                    }
-                    write!(o, "{}", "-".repeat(*w))?;
-                }
-                writeln!(o)
-            };
-            for (i, h) in headers.iter().enumerate() {
-                if i > 0 {
-                    write!(out, " | ")?;
-                }
-                write!(out, "{:<width$}", h, width = widths[i])?;
-            }
-            writeln!(out)?;
-            sep(&mut out)?;
-            for r in rows {
-                for (i, c) in r.iter().enumerate() {
-                    if i > 0 {
-                        write!(out, " | ")?;
-                    }
-                    write!(out, "{:<width$}", c, width = widths[i])?;
-                }
-                writeln!(out)?;
-            }
-        }
+        Format::Table => write!(out, "{}", tokei_table(headers, rows))?,
     }
     Ok(())
+}
+
+/// tokei look: `=` rules, Title Case headers, numeric columns right-aligned,
+/// a trailing `Total` row split off by a `-` rule.
+fn tokei_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let headers: Vec<String> = headers.iter().map(|h| title_case(h)).collect();
+    let chars = |s: &str| s.chars().count();
+    let widths: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| rows.iter().map(|r| chars(&r[i])).fold(chars(h), usize::max))
+        .collect();
+    // First column is the row label, even when it parses as a number.
+    let numeric: Vec<bool> = (0..headers.len())
+        .map(|i| {
+            i > 0
+                && rows
+                    .iter()
+                    .all(|r| r[i].is_empty() || r[i].parse::<f64>().is_ok())
+        })
+        .collect();
+    let line = |cells: &[String]| -> String {
+        let cells: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let w = widths[i];
+                if numeric[i] {
+                    format!("{c:>w$}")
+                } else {
+                    format!("{c:<w$}")
+                }
+            })
+            .collect();
+        format!(" {}\n", cells.join("  ").trim_end())
+    };
+    let rule = |c: &str| c.repeat(widths.iter().map(|w| w + 2).sum::<usize>()) + "\n";
+
+    let total = rows.last().filter(|r| r[0] == "Total");
+    let body = &rows[..rows.len() - total.iter().len()];
+    let mut out = rule("=") + &line(&headers) + &rule("=");
+    out.extend(body.iter().map(|r| line(r)));
+    if let Some(t) = total {
+        if !body.is_empty() {
+            out += &rule("-");
+        }
+        out += &line(t);
+    }
+    out + &rule("=")
+}
+
+/// `test_code` → `Test Code`.
+fn title_case(s: &str) -> String {
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Backslash-escape TSV metacharacters (PostgreSQL text-format convention)
@@ -620,7 +646,40 @@ fn json_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::tsv_escape;
+    use super::{tokei_table, tsv_escape};
+
+    fn cells(row: &[&str]) -> Vec<String> {
+        row.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tokei_table_aligns_and_splits_total() {
+        let got = tokei_table(
+            &cells(&["lang", "test_code", "owner"]),
+            &[
+                cells(&["Rust", "1200", "ana"]),
+                cells(&["Süß", "", "bo"]),
+                cells(&["Total", "1200", "ana"]),
+            ],
+        );
+        let want = "\
+=========================
+ Lang   Test Code  Owner
+=========================
+ Rust        1200  ana
+ Süß               bo
+-------------------------
+ Total       1200  ana
+=========================
+";
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn tokei_table_no_rows() {
+        let got = tokei_table(&cells(&["bucket"]), &[]);
+        assert_eq!(got, "========\n Bucket\n========\n========\n");
+    }
 
     #[test]
     fn tsv_escape_keeps_one_row_per_line() {

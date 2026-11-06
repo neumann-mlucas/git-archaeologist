@@ -146,14 +146,17 @@ lines, 90-day churn. Files without a grammar show as `other` (lines only).
 Filters: `--lang`, `--path`. This repo:
 
 ```
-lang     | files | lines | code | comments | blanks | test_code | test_pct | funcs | max_func | median_age_days | owner          | owner_pct | churn_90d
----------+-------+-------+------+----------+--------+-----------+----------+-------+----------+-----------------+----------------+-----------+----------
-Rust     | 21    | 7188  | 6005 | 616      | 567    | 2487      | 41.4     | 237   | 368      | 95              | neumann-mlucas | 100       | 2037     
-Markdown | 4     | 2020  | 1640 | 0        | 380    | 0         | 0        | 0     |          | 95              | neumann-mlucas | 100       | 140      
-Bash     | 1     | 366   | 298  | 39       | 29     | 0         | 0        | 3     | 9        | 95              | neumann-mlucas | 100       | 153      
-other    | 7     | 299   |      |          |        |           |          | 0     |          | 94              | neumann-mlucas | 100       | 5        
-JSON     | 1     | 14    | 14   | 0        | 0      | 0         | 0        | 0     |          | 94              | neumann-mlucas | 100       | 0        
-Total    | 34    | 9887  | 7957 | 655      | 976    | 2487      | 31.3     | 240   | 368      | 95              | neumann-mlucas | 100       | 2335     
+=============================================================================================================================================
+ Lang      Files  Lines  Code  Comments  Blanks  Test Code  Test Pct  Funcs  Max Func  Median Age Days  Owner           Owner Pct  Churn 90d
+=============================================================================================================================================
+ Rust         21   7976  6705       666     605       2727      40.7    269       368               95  neumann-mlucas        100       3105
+ Markdown      4   2065  1678         0     387          0         0      0                         95  neumann-mlucas        100        213
+ Bash          1    366   298        39      29          0         0      3         9               95  neumann-mlucas        100        153
+ other         7    299                                                   0                         94  neumann-mlucas        100          5
+ JSON          1     14    14         0       0          0         0      0                         94  neumann-mlucas        100          0
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Total        34  10720  8695       705    1021       2727      31.4    272       368               95  neumann-mlucas        100       3476
+=============================================================================================================================================
 ```
 
 `burndown --by kind` gives the same test / non-test split per bucket.
@@ -166,11 +169,15 @@ omitted, `lines` = code + comments + blanks.
 
 ```
 $ git-archaeologist stats --by file --rev HEAD~2..HEAD
-file                    | files | lines | code | comments | blanks | test_code | test_pct | funcs
-src/index/treesitter.rs | 0     | 571   | 502  | 36       | 33     | 189       | 3.7      | 27
-src/query.rs            | 0     | 107   | 98   | 8        | 1      | 0         | -1       | 1
-...
-Total                   | 0     | 860   | 761  | 55       | 44     | 233       | -0.1     | 30
+===========================================================================================
+ File                     Files  Lines  Code  Comments  Blanks  Test Code  Test Pct  Funcs
+===========================================================================================
+ src/index/treesitter.rs      0    571   502        36      33        189       3.7     27
+ src/query.rs                 0    106    99         5       2          0      -0.8      2
+ ...
+-------------------------------------------------------------------------------------------
+ Total                        0    833   738        50      45        240       0.1     32
+===========================================================================================
 ```
 
 #### Test detection
