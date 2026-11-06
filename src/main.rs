@@ -365,7 +365,7 @@ fn build_filters(q: &QueryArgs) -> Result<query::Filters> {
 }
 
 fn render_table(t: &query::Table, format: Format) -> Result<()> {
-    render(&t.headers, &t.rows, format)
+    render(&t.headers, &t.rows, format, true)
 }
 
 fn run_index(
@@ -462,7 +462,7 @@ fn run_sql(cache: &cache::Cache, query: &str, format: Format) -> Result<()> {
         }
         rows.push(r);
     }
-    render(&headers, &rows, format)
+    render(&headers, &rows, format, false)
 }
 
 fn value_to_string(v: duckdb::types::ValueRef) -> String {
@@ -491,7 +491,8 @@ fn value_to_string(v: duckdb::types::ValueRef) -> String {
     }
 }
 
-fn render(headers: &[String], rows: &[Vec<String>], format: Format) -> Result<()> {
+/// `report`: a built-in report, not user SQL (see `tokei_table`).
+fn render(headers: &[String], rows: &[Vec<String>], format: Format, report: bool) -> Result<()> {
     let out = std::io::stdout();
     let mut out = out.lock();
     match format {
@@ -542,15 +543,24 @@ fn render(headers: &[String], rows: &[Vec<String>], format: Format) -> Result<()
             }
             writeln!(out, "]")?;
         }
-        Format::Table => write!(out, "{}", tokei_table(headers, rows))?,
+        Format::Table => write!(out, "{}", tokei_table(headers, rows, report))?,
     }
     Ok(())
 }
 
-/// tokei look: `=` rules, Title Case headers, numeric columns right-aligned,
-/// a trailing `Total` row split off by a `-` rule.
-fn tokei_table(headers: &[String], rows: &[Vec<String>]) -> String {
-    let headers: Vec<String> = headers.iter().map(|h| title_case(h)).collect();
+/// tokei look: `=` rules, numeric columns right-aligned, one line per row
+/// (cells escaped like TSV). Built-in reports also get Title Case headers
+/// and a trailing `Total` row split off by a `-` rule; user SQL keeps its
+/// real column names and has no `Total` convention.
+fn tokei_table(headers: &[String], rows: &[Vec<String>], report: bool) -> String {
+    let headers: Vec<String> = headers
+        .iter()
+        .map(|h| if report { title_case(h) } else { tsv_escape(h) })
+        .collect();
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(|c| tsv_escape(c)).collect())
+        .collect();
     let chars = |s: &str| s.chars().count();
     let widths: Vec<usize> = headers
         .iter()
@@ -583,7 +593,7 @@ fn tokei_table(headers: &[String], rows: &[Vec<String>]) -> String {
     };
     let rule = |c: &str| c.repeat(widths.iter().map(|w| w + 2).sum::<usize>()) + "\n";
 
-    let total = rows.last().filter(|r| r[0] == "Total");
+    let total = rows.last().filter(|r| report && r[0] == "Total");
     let body = &rows[..rows.len() - total.iter().len()];
     let mut out = rule("=") + &line(&headers) + &rule("=");
     out.extend(body.iter().map(|r| line(r)));
@@ -661,6 +671,7 @@ mod tests {
                 cells(&["Süß", "", "bo"]),
                 cells(&["Total", "1200", "ana"]),
             ],
+            true,
         );
         let want = "\
 =========================
@@ -676,8 +687,26 @@ mod tests {
     }
 
     #[test]
+    fn tokei_table_user_sql_keeps_names_and_rows() {
+        let got = tokei_table(
+            &cells(&["my_Col", "count_star()"]),
+            &[cells(&["a\nb", "1"]), cells(&["Total", "5"])],
+            false,
+        );
+        let want = "\
+======================
+ my_Col  count_star()
+======================
+ a\\nb               1
+ Total              5
+======================
+";
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn tokei_table_no_rows() {
-        let got = tokei_table(&cells(&["bucket"]), &[]);
+        let got = tokei_table(&cells(&["bucket"]), &[], true);
         assert_eq!(got, "========\n Bucket\n========\n========\n");
     }
 
