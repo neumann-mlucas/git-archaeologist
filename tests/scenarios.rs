@@ -664,6 +664,31 @@ fn numbered(n: usize) -> String {
     (1..=n).map(|i| format!("line {i}\n")).collect()
 }
 
+/// A corrupt cache is rebuilt: DuckDB's checksum error says "in block at",
+/// which must not read as the "Could not set lock" of a cache in use.
+#[test]
+fn scenario_corrupt_cache_is_rebuilt() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("a.txt", "1\n")]);
+    env.arch_stdout(&["index"]);
+    let cache = std::fs::read_dir(env.xdg_data.join("git-archaeologist/caches"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("cache.duckdb");
+    let mut bytes = std::fs::read(&cache).unwrap();
+    bytes[8192..8192 + 16384].fill(0xAB);
+    std::fs::write(&cache, bytes).unwrap();
+
+    assert_eq!(env.sql_i64("SELECT COUNT(*) FROM commits"), 1);
+}
+
 /// Known drift: main edits `a.txt` after a branch renamed it, so the fold
 /// sees a new file at the old path and HEAD gains a ghost `a.txt`.
 #[test]

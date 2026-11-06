@@ -36,9 +36,10 @@ pub fn open(path: impl AsRef<Path>) -> Result<Cache> {
 fn is_stale(path: &Path) -> Result<bool> {
     let conn = match Connection::open(path) {
         Ok(c) => c,
-        // ponytail: matches DuckDB's "Could not set lock on file" text;
+        // ponytail: matches DuckDB's "Could not set lock on file" text (bare
+        // "lock" also hits corruption errors: "in block at location");
         // switch to a typed check if duckdb-rs ever exposes one.
-        Err(e) if e.to_string().contains("lock") => {
+        Err(e) if e.to_string().contains("Could not set lock") => {
             anyhow::bail!("cache {} is in use by another process: {e}", path.display())
         }
         Err(_) => return Ok(true),
