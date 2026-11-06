@@ -681,16 +681,7 @@ fn fit_half_life(table: &Table) -> Result<Table> {
 /// `lines`, `median_age_days`, `owner` come from `line_births` (surviving
 /// lines + birth commit); `churn_90d` = added + deleted in the last 90 days.
 pub fn stats(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result<Table> {
-    let key = match by {
-        "lang" | "language" => "language".to_string(),
-        "file" => "path".to_string(),
-        // Directory prefix, `depth` segments, filename excluded; root files → '.'.
-        "dir" => format!(
-            "COALESCE(NULLIF(array_to_string(list_slice(string_split(path, '/'), 1, \
-             LEAST({depth}, len(string_split(path, '/')) - 1)), '/'), ''), '.')"
-        ),
-        other => bail!("--by must be one of lang|dir|file, got {other:?}"),
-    };
+    let key = stats_key(by, depth)?;
     let file_filter = format!(
         "{}{}",
         filters.path_where("path"),
@@ -765,6 +756,104 @@ pub fn stats(cache: &Cache, filters: &Filters, by: &str, depth: usize) -> Result
          ORDER  BY f.g IS NULL, lines DESC, f.g",
     );
     run_sql(cache, &sql)
+}
+
+fn stats_key(by: &str, depth: usize) -> Result<String> {
+    Ok(match by {
+        "lang" | "language" => "language".to_string(),
+        "file" => "path".to_string(),
+        // Directory prefix, `depth` segments, filename excluded; root files → '.'.
+        "dir" => format!(
+            "COALESCE(NULLIF(array_to_string(list_slice(string_split(path, '/'), 1, \
+             LEAST({depth}, len(string_split(path, '/')) - 1)), '/'), ''), '.')"
+        ),
+        other => bail!("--by must be one of lang|dir|file, got {other:?}"),
+    })
+}
+
+/// `stats` for a non-HEAD commit (`rev_*` tables), or the delta rev − base
+/// when `base_*` is non-empty. Parse-only: no line_births, so no
+/// age/owner/churn, and files without a grammar are absent.
+pub fn stats_rev(
+    cache: &Cache,
+    filters: &Filters,
+    by: &str,
+    depth: usize,
+    delta: bool,
+) -> Result<Table> {
+    let key = stats_key(by, depth)?;
+    let file_filter = format!(
+        "{}{}",
+        filters.path_where("path"),
+        filters.lang_where("language")
+    );
+    let pct = |t: &str| format!("100.0 * {t}.test_code / NULLIF({t}.code, 0)");
+    let select = if delta {
+        let d = |c: &str| format!("COALESCE(r.{c}, 0) - COALESCE(b.{c}, 0) AS {c}");
+        format!(
+            "SELECT * FROM (
+               SELECT COALESCE(r.g, b.g, 'Total') AS {by}, (r.g IS NULL AND b.g IS NULL) AS total,
+                      {}, {}, {}, {}, {}, {},
+                      round(COALESCE({}, 0) - COALESCE({}, 0), 1) AS test_pct, {}
+               FROM   (SELECT * FROM a WHERE side = 'rev') r
+               FULL   JOIN (SELECT * FROM a WHERE side = 'base') b ON r.g IS NOT DISTINCT FROM b.g)
+             WHERE  total OR files <> 0 OR lines <> 0 OR code <> 0 OR comments <> 0
+                    OR blanks <> 0 OR test_code <> 0 OR funcs <> 0
+             ORDER  BY total, abs(lines) DESC, {by}",
+            d("files"),
+            d("lines"),
+            d("code"),
+            d("comments"),
+            d("blanks"),
+            d("test_code"),
+            pct("r"),
+            pct("b"),
+            d("funcs"),
+        )
+    } else {
+        format!(
+            "SELECT COALESCE(r.g, 'Total') AS {by}, r.files, r.lines, r.code, r.comments,
+                    r.blanks, r.test_code, round({}, 1) AS test_pct, r.funcs, r.max_func
+             FROM   a r WHERE side = 'rev'
+             ORDER  BY r.g IS NULL, r.lines DESC, r.g",
+            pct("r")
+        )
+    };
+    let sql = format!(
+        "WITH k AS (
+             SELECT side, path, {key} AS g, code, comments, blanks, test_code
+             FROM   (SELECT 'rev' AS side, * FROM rev_stats
+                     UNION ALL SELECT 'base', * FROM base_stats)
+             WHERE  1=1 {file_filter}
+         ),
+         agg AS (
+             SELECT side, g, COUNT(*) AS files, SUM(code + comments + blanks) AS lines,
+                    SUM(code) AS code, SUM(comments) AS comments, SUM(blanks) AS blanks,
+                    SUM(test_code) AS test_code
+             FROM   k GROUP BY GROUPING SETS ((side, g), (side))
+         ),
+         fa AS (
+             SELECT k.side, k.g, COUNT(*) AS funcs, MAX(f.end_line - f.start_line + 1) AS max_func
+             FROM   (SELECT 'rev' AS side, * FROM rev_funcs
+                     UNION ALL SELECT 'base', * FROM base_funcs) f
+             JOIN   k USING (side, path)
+             GROUP  BY GROUPING SETS ((k.side, k.g), (k.side))
+         ),
+         a AS (
+             SELECT agg.*, COALESCE(fa.funcs, 0) AS funcs, fa.max_func
+             FROM   agg LEFT JOIN fa ON fa.side = agg.side AND fa.g IS NOT DISTINCT FROM agg.g
+         )
+         {select}"
+    );
+    let mut t = run_sql(cache, &sql)?;
+    if delta {
+        // Drop the helper `total` column.
+        t.headers.remove(1);
+        for r in &mut t.rows {
+            r.remove(1);
+        }
+    }
+    Ok(t)
 }
 
 fn run_sql(cache: &Cache, sql: &str) -> Result<Table> {

@@ -158,6 +158,21 @@ Total    | 34    | 9887  | 7957 | 655      | 976    | 2487      | 31.3     | 240
 
 `burndown --by kind` gives the same test / non-test split per bucket.
 
+`--rev <commit>` snapshots another commit (`HEAD~3`, branch, tag, sha);
+`--rev A..B` prints the per-group delta B − A (empty side = `HEAD`, groups
+with no change dropped, `test_pct` in percentage points). Both are
+parse-only: no `median_age_days`/`owner`/`churn_90d`, grammar-less files
+omitted, `lines` = code + comments + blanks.
+
+```
+$ git-archaeologist stats --by file --rev HEAD~2..HEAD
+file                    | files | lines | code | comments | blanks | test_code | test_pct | funcs
+src/index/treesitter.rs | 0     | 571   | 502  | 36       | 33     | 189       | 3.7      | 27
+src/query.rs            | 0     | 107   | 98   | 8        | 1      | 0         | -1       | 1
+...
+Total                   | 0     | 860   | 761  | 55       | 44     | 233       | -0.1     | 30
+```
+
 #### Test detection
 
 Static, per code line, no toolchain or test run. A line is test code if:
@@ -329,7 +344,7 @@ Subcommand-specific:
 - `survival --fit exp` — half-life scalar; returns NULL + `reason`
   column when < 100 deletion events.
 - `hotspot --top N --lang L` — `--lang` required.
-- `stats --by lang|dir|file --depth N` — HEAD snapshot; only `--lang`/`--path` filters.
+- `stats --by lang|dir|file --depth N [--rev C | --rev A..B]` — commit snapshot or delta; only `--lang`/`--path` filters.
 - `churn --depth N` (default 1) — path-segment granularity for
   `--by module`.
 

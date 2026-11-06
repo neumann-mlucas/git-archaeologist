@@ -446,15 +446,35 @@ pub fn snapshot_head(repo: &Repo, cache: &Cache) -> Result<()> {
             "warning: cache indexed at a different HEAD; age/owner/churn are stale — run `index`"
         );
     }
-    cache.conn.execute_batch(
-        "CREATE OR REPLACE TEMP TABLE head_stats (path TEXT, language TEXT, code INTEGER, comments INTEGER, blanks INTEGER, test_code INTEGER);
-         CREATE OR REPLACE TEMP TABLE head_funcs (path TEXT, start_line INTEGER, end_line INTEGER);",
-    )?;
-    let files = treesitter::batch_sampled(repo, std::slice::from_ref(&head))
-        .remove(&head)
+    snapshot(repo, cache, Some(&head), "head")
+}
+
+/// Resolve a revspec (`HEAD~3`, branch, tag, sha) to a commit sha.
+pub fn resolve_rev(repo: &Repo, spec: &str) -> Result<String> {
+    Ok(repo
+        .git
+        .rev_parse_single(spec)
+        .with_context(|| format!("resolving {spec:?}"))?
+        .object()?
+        .peel_to_kind(gix::object::Kind::Commit)
+        .with_context(|| format!("{spec:?} is not a commit"))?
+        .id
+        .to_string())
+}
+
+/// Parse `sha`'s tree into temp tables `{name}_stats` / `{name}_funcs`.
+/// `None` leaves them empty. Grammar-backed files only.
+pub fn snapshot(repo: &Repo, cache: &Cache, sha: Option<&str>, name: &str) -> Result<()> {
+    cache.conn.execute_batch(&format!(
+        "CREATE OR REPLACE TEMP TABLE {name}_stats (path TEXT, language TEXT, code INTEGER, comments INTEGER, blanks INTEGER, test_code INTEGER);
+         CREATE OR REPLACE TEMP TABLE {name}_funcs (path TEXT, start_line INTEGER, end_line INTEGER);",
+    ))?;
+    let Some(sha) = sha else { return Ok(()) };
+    let files = treesitter::batch_sampled(repo, &[sha.to_string()])
+        .remove(sha)
         .unwrap_or_default();
-    let mut stats = cache.conn.appender("head_stats")?;
-    let mut funcs = cache.conn.appender("head_funcs")?;
+    let mut stats = cache.conn.appender(&format!("{name}_stats"))?;
+    let mut funcs = cache.conn.appender(&format!("{name}_funcs"))?;
     for f in files {
         let s = &f.stat;
         stats.append_row(params![

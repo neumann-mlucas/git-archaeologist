@@ -107,6 +107,10 @@ enum Cmd {
         /// Directory depth for `--by dir`.
         #[arg(long, default_value_t = 1)]
         depth: usize,
+        /// Commit to snapshot (default HEAD), or `A..B` for the delta B − A.
+        /// Non-HEAD: no age/owner/churn, grammar-backed files only.
+        #[arg(long)]
+        rev: Option<String>,
         #[arg(long)]
         lang: Option<String>,
         #[arg(long)]
@@ -294,6 +298,7 @@ fn main() -> Result<()> {
         Cmd::Stats {
             by,
             depth,
+            rev,
             lang,
             path,
             format,
@@ -301,11 +306,32 @@ fn main() -> Result<()> {
             if depth == 0 {
                 bail!("--depth must be >= 1");
             }
-            ensure_indexed(&repo, &mut cache, cfg_bucket, false)?;
-            index::snapshot_head(&repo, &cache)?;
             let filters =
                 query::Filters::parse(None, None, lang.as_deref(), None, path.as_deref())?;
-            let table = query::stats(&cache, &filters, &by, depth)?;
+            // `A..B` (git semantics: empty side = HEAD) → delta; else one commit.
+            let (base, tip) = match rev.as_deref() {
+                Some(r) if r.contains("...") => bail!("--rev takes A..B, not A...B"),
+                Some(r) => match r.split_once("..") {
+                    Some((a, b)) => (
+                        Some(index::resolve_rev(
+                            &repo,
+                            if a.is_empty() { "HEAD" } else { a },
+                        )?),
+                        index::resolve_rev(&repo, if b.is_empty() { "HEAD" } else { b })?,
+                    ),
+                    None => (None, index::resolve_rev(&repo, r)?),
+                },
+                None => (None, index::resolve_rev(&repo, "HEAD")?),
+            };
+            let table = if base.is_none() && tip == index::resolve_rev(&repo, "HEAD")? {
+                ensure_indexed(&repo, &mut cache, cfg_bucket, false)?;
+                index::snapshot_head(&repo, &cache)?;
+                query::stats(&cache, &filters, &by, depth)?
+            } else {
+                index::snapshot(&repo, &cache, Some(&tip), "rev")?;
+                index::snapshot(&repo, &cache, base.as_deref(), "base")?;
+                query::stats_rev(&cache, &filters, &by, depth, base.is_some())?
+            };
             render_table(&table, FormatArg::resolve(format))
         }
         Cmd::Survival { q, fit } => {

@@ -584,3 +584,57 @@ fn scenario_stats_snapshot() {
         .collect();
     assert_eq!(dirs, ["src", ".", "tests", "Total"]);
 }
+
+/// `stats --rev`: one non-HEAD commit, and `A..B` as per-group delta B − A
+/// (unchanged groups dropped, `Total` kept).
+#[test]
+fn scenario_stats_rev_delta() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    dsl::build(
+        &env.repo,
+        &[
+            Action::commit(
+                "Alice",
+                "2025-01-01T00:00:00Z",
+                "feat: a",
+                &[("src/a.rs", "fn f() {}\n"), ("lib/c.py", "x = 1\n")],
+            ),
+            Action::commit(
+                "Alice",
+                "2025-01-02T00:00:00Z",
+                "feat: b",
+                &[("src/a.rs", "fn f() {}\n\n#[test]\nfn t() {\n    f();\n}\n")],
+            ),
+        ],
+    );
+    let rows = |args: &[&str]| -> Vec<String> {
+        let mut a = vec!["stats", "--format", "tsv", "--by", "dir"];
+        a.extend_from_slice(args);
+        env.arch_stdout(&a)
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').take(9).collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    // dir files lines code comments blanks test_code test_pct funcs
+    assert_eq!(
+        rows(&["--rev", "HEAD~1"]),
+        [
+            "lib 1 1 1 0 0 0 0 0",
+            "src 1 1 1 0 0 0 0 1",
+            "Total 2 2 2 0 0 0 0 1"
+        ]
+    );
+    assert_eq!(
+        rows(&["--rev", "HEAD~1..HEAD"]),
+        ["src 0 5 4 0 1 4 80 1", "Total 0 5 4 0 1 4 66.7 1"]
+    );
+    assert_eq!(
+        rows(&["--rev", "HEAD~1.."]),
+        rows(&["--rev", "HEAD~1..HEAD"])
+    );
+}
