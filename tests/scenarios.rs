@@ -683,6 +683,9 @@ fn scenario_same_second_commits_fold_in_parent_order() {
     actions.push(Action::commit("Alice", at, "feat: g", &[("g.txt", "g\n")]));
     actions.push(Action::delete("Alice", at, "chore: drop g", &["g.txt"]));
     dsl::build(&env.repo, &actions);
+    let delete = git_at(&env, at, &["rev-parse", "HEAD"]);
+    let add = git_at(&env, at, &["rev-parse", "HEAD~1"]);
+    assert!(delete < add, "fixture no longer sorts the delete first");
     env.arch_stdout(&["index"]);
     env.assert_matches_git();
 }
@@ -722,8 +725,8 @@ fn scenario_child_older_than_parent_folds_after_it() {
     env.assert_matches_git();
 }
 
-/// Rewritten history: the amended-away commit leaves every table, so an
-/// incremental `index` agrees with a fresh `reindex`.
+/// Rewritten history: the amended-away commit leaves every table, its
+/// bucket keeps one sample, and incremental `index` agrees with `reindex`.
 #[test]
 fn scenario_amended_commit_leaves_no_orphans() {
     if !have_git() {
@@ -734,29 +737,29 @@ fn scenario_amended_commit_leaves_no_orphans() {
     git_at(&env, "2025-01-01T00:00:00Z", &["init", "-q", "-b", "main"]);
     commit_file(
         &env,
-        "2025-01-01T00:00:00Z",
+        "2025-01-01T10:00:00Z",
         "a.rs",
         "fn a() {}\n",
         "feat: one",
     );
     commit_file(
         &env,
-        "2025-01-02T00:00:00Z",
+        "2025-01-01T11:00:00Z",
         "a.rs",
         "fn a() {}\nfn b() {}\n",
         "feat: two",
     );
-    let gone = git_at(&env, "2025-01-02T00:00:00Z", &["rev-parse", "HEAD"]);
-    env.arch_stdout(&["index"]);
+    let gone = git_at(&env, "2025-01-01T11:00:00Z", &["rev-parse", "HEAD"]);
+    env.arch_stdout(&["index", "--bucket", "day"]);
 
     std::fs::write(env.repo.join("a.rs"), "fn a() {}\nfn c() {}\nfn d() {}\n").unwrap();
-    git_at(&env, "2025-01-03T00:00:00Z", &["add", "a.rs"]);
+    git_at(&env, "2025-01-01T12:00:00Z", &["add", "a.rs"]);
     git_at(
         &env,
-        "2025-01-03T00:00:00Z",
+        "2025-01-01T12:00:00Z",
         &["commit", "-q", "--amend", "-m", "feat: two amended"],
     );
-    env.arch_stdout(&["index"]);
+    env.arch_stdout(&["index", "--bucket", "day"]);
 
     for table in [
         "commits",
@@ -776,11 +779,24 @@ fn scenario_amended_commit_leaves_no_orphans() {
             "orphan rows left in {table}"
         );
     }
-    let totals = "SELECT (SELECT COUNT(*) FROM commits) * 1000 + SUM(added) FROM file_churn";
-    let incremental = env.sql_i64(totals);
-    assert_eq!(incremental, 2003);
-    env.arch_stdout(&["reindex"]);
-    assert_eq!(incremental, env.sql_i64(totals));
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM commits WHERE is_sampled"),
+        1
+    );
+    let state = || {
+        env.arch_stdout(&[
+            "sql",
+            "SELECT c.sha, c.bucket_key, c.is_sampled, \
+                    (SELECT SUM(added) FROM file_churn f WHERE f.sha = c.sha) AS added, \
+                    (SELECT COUNT(*) FROM file_stats s WHERE s.sha = c.sha) AS stats \
+             FROM commits c ORDER BY c.sha",
+            "--format",
+            "tsv",
+        ])
+    };
+    let incremental = state();
+    env.arch_stdout(&["reindex", "--bucket", "day"]);
+    assert_eq!(incremental, state());
     env.assert_matches_git();
 }
 
@@ -849,7 +865,10 @@ fn scenario_repeated_name_on_one_line_indexes() {
     let env = Env::new();
     one_commit(&env, &[("m.js", "function t(){}function t(){}\n")]);
     env.arch_stdout(&["index"]);
-    assert_eq!(env.sql_i64("SELECT COUNT(*) FROM funcs WHERE name = 't'"), 1);
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM funcs WHERE name = 't'"),
+        1
+    );
 }
 
 /// Known drift: main edits `a.txt` after a branch renamed it, so the fold

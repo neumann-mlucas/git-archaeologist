@@ -36,10 +36,7 @@ pub fn open(path: impl AsRef<Path>) -> Result<Cache> {
 fn is_stale(path: &Path) -> Result<bool> {
     let conn = match Connection::open(path) {
         Ok(c) => c,
-        // ponytail: matches DuckDB's "Could not set lock on file" text (bare
-        // "lock" also hits corruption errors: "in block at location");
-        // switch to a typed check if duckdb-rs ever exposes one.
-        Err(e) if e.to_string().contains("Could not set lock") => {
+        Err(e) if is_lock_error(&e.to_string()) => {
             anyhow::bail!("cache {} is in use by another process: {e}", path.display())
         }
         Err(_) => return Ok(true),
@@ -54,6 +51,13 @@ fn is_stale(path: &Path) -> Result<bool> {
     Ok(version.is_none_or(|v| v != schema::SCHEMA_VERSION))
 }
 
+/// ponytail: matches DuckDB's message text (bare "lock" also hits corruption
+/// errors: "in block at location"); switch to a typed check if duckdb-rs
+/// ever exposes one.
+fn is_lock_error(msg: &str) -> bool {
+    msg.contains("Could not set lock")
+}
+
 /// Cap DuckDB memory so large-repo indexing can't OOM the host, and
 /// disable insertion-order preservation (Appender path doesn't need it).
 /// Threads default to core count — nothing to set.
@@ -66,4 +70,20 @@ fn tune(conn: &Connection) -> Result<()> {
          SET memory_limit = '12GB';",
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_lock_error;
+
+    #[test]
+    fn lock_error_is_not_corruption() {
+        assert!(is_lock_error(
+            "IO Error: Could not set lock on file \"c.duckdb\": Conflicting lock is held"
+        ));
+        assert!(!is_lock_error(
+            "IO Error: Corrupt database file: computed checksum 1 does not match \
+             stored checksum 2 in block at location 8192"
+        ));
+    }
 }
