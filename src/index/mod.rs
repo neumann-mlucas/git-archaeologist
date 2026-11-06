@@ -6,8 +6,7 @@ pub mod parse;
 pub mod treesitter;
 pub mod walker;
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use duckdb::params;
@@ -26,10 +25,14 @@ pub struct IndexOptions {
 pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     let ignore_revs = parse::load_ignore_revs(&repo.root);
 
+    // Before the walk: a HEAD read later can be a commit the walk never saw
+    // (concurrent pull), which would empty the fold.
+    let head = repo.git.head_id().ok().map(|id| id.to_string());
     let all_commits = walker::walk(repo, &ignore_revs)?;
     if all_commits.is_empty() {
         return Ok(());
     }
+    let head = head.context("resolving HEAD")?;
 
     let mut size = opts
         .bucket_override
@@ -386,7 +389,6 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         )?;
     }
 
-    let head = repo.git.head_id().context("resolving HEAD")?.to_string();
     queries::set_indexed_head(&cache.conn, &head)?;
 
     // Rebuild secondary indexes after bulk write completes. Query paths
@@ -406,10 +408,8 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
 
     // Phase 3 — cohort fold materializes `line_births` from hunks.
     eprintln!("cohort fold…");
-    // `line_births` = lines alive at HEAD, so only HEAD's ancestry folds;
-    // unmerged branches would splice foreign hunks into HEAD's files.
-    let order = head_order(&all_commits, &head);
-    cohort::fold_and_materialize(cache, &order).context("cohort fold")?;
+    let chain = first_parent_chain(&all_commits, &head);
+    cohort::fold_and_materialize(repo, cache, &chain).context("cohort fold")?;
 
     // Recreate line_births indexes after the fold's bulk insert.
     cache.conn.execute_batch(
@@ -420,61 +420,27 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     Ok(())
 }
 
-/// Fold rank of every sha reachable from `head`: parents always before
-/// children, whatever their timestamps say; otherwise walk order
-/// (`commits` is oldest-first). Timestamps alone can't order commits:
-/// rebases share a second, clocks skew.
-fn head_order(commits: &[CommitInfo], head: &str) -> HashMap<String, usize> {
-    let pos: HashMap<&str, usize> = commits
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.sha.as_str(), i))
-        .collect();
-    let parents = |i: usize| {
-        commits[i]
+/// HEAD's first-parent chain, oldest first. Stops at a parent outside
+/// `commits` (shallow boundary).
+fn first_parent_chain<'a>(commits: &'a [CommitInfo], head: &str) -> Vec<&'a CommitInfo> {
+    let by_sha: HashMap<&str, &CommitInfo> = commits.iter().map(|c| (c.sha.as_str(), c)).collect();
+    let mut chain = Vec::new();
+    let mut cur = by_sha.get(head).copied();
+    while let Some(c) = cur {
+        chain.push(c);
+        cur = c
             .parents
-            .iter()
-            .filter_map(|p| pos.get(p.as_str()).copied())
-    };
-
-    let mut reachable: HashSet<usize> = HashSet::new();
-    let mut stack: Vec<usize> = pos.get(head).copied().into_iter().collect();
-    while let Some(i) = stack.pop() {
-        if reachable.insert(i) {
-            stack.extend(parents(i));
-        }
+            .first()
+            .and_then(|p| by_sha.get(p.as_str()).copied());
     }
-
-    // Kahn's algorithm, the heap picking the oldest ready commit.
-    let mut waiting_on = vec![0usize; commits.len()];
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); commits.len()];
-    for &i in &reachable {
-        for p in parents(i) {
-            waiting_on[i] += 1;
-            children[p].push(i);
-        }
-    }
-    let mut ready: BinaryHeap<Reverse<usize>> = reachable
-        .iter()
-        .filter(|&&i| waiting_on[i] == 0)
-        .map(|&i| Reverse(i))
-        .collect();
-    let mut rank = HashMap::with_capacity(reachable.len());
-    while let Some(Reverse(i)) = ready.pop() {
-        rank.insert(commits[i].sha.clone(), rank.len());
-        for &c in &children[i] {
-            waiting_on[c] -= 1;
-            if waiting_on[c] == 0 {
-                ready.push(Reverse(c));
-            }
-        }
-    }
-    rank
+    chain.reverse();
+    chain
 }
 
 fn wipe_data(cache: &Cache) -> Result<()> {
     cache.conn.execute_batch(
         "DELETE FROM line_births;
+         DELETE FROM chain_births;
          DELETE FROM funcs;
          DELETE FROM file_stats;
          DELETE FROM file_churn;

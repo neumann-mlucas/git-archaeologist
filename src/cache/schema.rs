@@ -1,7 +1,7 @@
 use anyhow::Result;
 use duckdb::Connection;
 
-pub const SCHEMA_VERSION: &str = "5";
+pub const SCHEMA_VERSION: &str = "6";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -121,6 +121,15 @@ CREATE TABLE IF NOT EXISTS line_births (
 );
 CREATE INDEX IF NOT EXISTS idx_line_births_bucket ON line_births(birth_bucket);
 CREATE INDEX IF NOT EXISTS idx_line_births_path   ON line_births(path);
+
+-- Lines added per (sha, path) along HEAD's first-parent chain, merges
+-- included: what `line_births` survivors are born from.
+CREATE TABLE IF NOT EXISTS chain_births (
+    sha  TEXT    NOT NULL,
+    path TEXT    NOT NULL,
+    born INTEGER NOT NULL,
+    PRIMARY KEY (sha, path)
+);
 "#;
 
 pub fn migrate(conn: &Connection) -> Result<()> {

@@ -528,24 +528,22 @@ pub fn survival(cache: &Cache, filters: &Filters, fit_exp: bool) -> Result<Table
     );
     let birth_path_filter = format!(
         "{}{}",
-        filters.path_where("h.path"),
-        filters.lang_path_where("h.path")
+        filters.path_where("cb.path"),
+        filters.lang_path_where("cb.path")
     );
     let commit_filter = filters.commit_where();
     let author_join = filters.author_join();
 
-    // Total lines ever born per cohort = lines still alive + all deletes
-    // that touched files after cohort birth. Approximation: use total
-    // per-bucket added (from hunks new_len sum where new_len > 0) as
-    // "births" and per-bucket deleted as "deaths". Filters restrict the
-    // cohort universe when supplied.
+    // Born = lines added along HEAD's first-parent chain, the same fold
+    // `line_births` comes from, so a cohort's alive never exceeds its born.
+    // Filters restrict the cohort universe when supplied.
     let sql = format!(
         "WITH births AS (
-             SELECT c.bucket_key AS cohort, SUM(h.new_len) AS born
-             FROM   hunks h
-             JOIN   commits c ON c.sha = h.sha
+             SELECT c.bucket_key AS cohort, SUM(cb.born) AS born
+             FROM   chain_births cb
+             JOIN   commits c ON c.sha = cb.sha
              {author_join}
-             WHERE  h.new_len > 0 {commit_filter} {birth_path_filter}
+             WHERE  1=1 {commit_filter} {birth_path_filter}
              GROUP  BY c.bucket_key
          ),
          alive_now AS (

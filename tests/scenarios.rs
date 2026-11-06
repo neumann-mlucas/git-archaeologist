@@ -871,11 +871,14 @@ fn scenario_repeated_name_on_one_line_indexes() {
     );
 }
 
-/// Known drift: main edits `a.txt` after a branch renamed it, so the fold
-/// sees a new file at the old path and HEAD gains a ghost `a.txt`.
+/// Main edits `a.txt` after a branch renamed it: the merge's diff against
+/// main carries the rename, so no ghost `a.txt` survives.
 #[test]
-#[ignore = "known drift: linear fold can't follow a rename across branches"]
-fn known_drift_rename_on_branch() {
+fn scenario_rename_on_branch_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
     let env = Env::new();
     let d = |n: u32| format!("2025-01-0{n}T00:00:00Z");
     git_at(&env, &d(1), &["init", "-q", "-b", "main"]);
@@ -900,11 +903,13 @@ fn known_drift_rename_on_branch() {
     truth::assert_line_counts(&env.repo, &env.births());
 }
 
-/// Known drift: a merge's own content has no hunks, so lines added while
-/// resolving it are missing from `line_births`.
+/// Lines written while resolving a merge exist only in the merge's diff.
 #[test]
-#[ignore = "known drift: merge commits are not diffed"]
-fn known_drift_evil_merge() {
+fn scenario_evil_merge_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
     let env = Env::new();
     let d = |n: u32| format!("2025-01-0{n}T00:00:00Z");
     git_at(&env, &d(1), &["init", "-q", "-b", "main"]);
@@ -923,4 +928,55 @@ fn known_drift_evil_merge() {
     git_at(&env, &d(4), &["commit", "-q", "-m", "merge side"]);
     env.arch_stdout(&["index"]);
     truth::assert_line_counts(&env.repo, &env.births());
+}
+
+/// Branch lines are born at the merge, and `survival` measures them there:
+/// no cohort outlives its births, and the branch commit's bucket is gone.
+#[test]
+fn scenario_branch_lines_are_born_at_merge() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    let d = |n: u32| format!("2025-01-0{n}T00:00:00Z");
+    git_at(&env, &d(1), &["init", "-q", "-b", "main"]);
+    commit_file(&env, &d(1), "f.txt", &numbered(2), "feat: base");
+    git_at(&env, &d(2), &["checkout", "-q", "-b", "side"]);
+    commit_file(&env, &d(2), "g.txt", "g1\ng2\n", "feat: side");
+    let branch = git_at(&env, &d(2), &["rev-parse", "HEAD"]);
+    git_at(&env, &d(3), &["checkout", "-q", "main"]);
+    commit_file(&env, &d(3), "h.txt", "h\n", "feat: main");
+    git_at(
+        &env,
+        &d(4),
+        &["merge", "-q", "--no-ff", "side", "-m", "merge"],
+    );
+    let merge = git_at(&env, &d(4), &["rev-parse", "HEAD"]);
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+
+    truth::assert_line_counts(&env.repo, &env.births());
+    assert_eq!(
+        env.sql_i64(&format!(
+            "SELECT COUNT(*) FROM line_births WHERE path = 'g.txt' AND birth_sha = '{merge}'"
+        )),
+        2
+    );
+    assert_eq!(
+        env.sql_i64(&format!(
+            "SELECT COUNT(*) FROM chain_births WHERE sha = '{branch}'"
+        )),
+        0
+    );
+
+    let out = env.arch_stdout(&["survival", "--format", "tsv"]);
+    let rows: Vec<Vec<&str>> = out
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').collect())
+        .collect();
+    assert_eq!(rows.len(), 3, "base, main, merge cohorts:\n{out}");
+    for r in rows {
+        assert_eq!(r[1], r[2], "all lines alive, so born == alive:\n{out}");
+    }
 }

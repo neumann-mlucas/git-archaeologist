@@ -2,9 +2,14 @@
 //! history and emits one `line_births(path, line_no, birth_sha,
 //! birth_bucket)` row per surviving line.
 //!
+//! Only HEAD's first-parent chain folds, with each merge diffed against
+//! its first parent. Every hunk then applies to the exact file state it
+//! was diffed from, so line counts match HEAD. Branch commits don't fold:
+//! their lines are born at the merge that landed them.
+//!
 //! Algorithm (SPEC §Indexing pipeline, Phase 2):
-//!   1. Load every non-merge hunk joined with its commit's bucket_key, keep
-//!      HEAD's ancestry, and order it parents-before-children.
+//!   1. Load the chain's non-merge hunks, add its merges' diffs, order by
+//!      chain position, and record births per (sha, path) in `chain_births`.
 //!   2. Walk commits in order, tracking file identity per live path: a
 //!      rename moves the identity to the new path, a full delete retires
 //!      it. A path reused after a rename/delete starts a fresh file.
@@ -16,10 +21,8 @@
 //!   5. INSERT the final Vec<(sha, bucket)> as `line_births`.
 //!
 //! v1 caveats (per SPEC "What we do NOT test"):
-//! - Merges are skipped, matching the rest of the indexer's non-merge
-//!   sampling — cross-branch content only shows up when it lands via a
-//!   non-merge commit. Lines added in a merge are lost, and a rename on a
-//!   branch misses edits to the old path on main (`known_drift_*` tests).
+//! - Merge hunks aren't stored (`hunks` and churn stay merge-free), so
+//!   every run re-diffs the chain's merges.
 //! - Serial. Rayon parallelism across files is a v1.x perf follow-up.
 
 use std::collections::HashMap;
@@ -29,6 +32,9 @@ use duckdb::params;
 use rayon::prelude::*;
 
 use crate::cache::Cache;
+use crate::index::churn;
+use crate::index::walker::CommitInfo;
+use crate::repo::Repo;
 
 #[derive(Clone)]
 struct HunkRow {
@@ -56,13 +62,19 @@ impl HunkRow {
     }
 }
 
-/// `order`: fold rank of every sha reachable from HEAD. `line_births`
-/// describes HEAD's files, so hunks from unmerged branches are excluded.
-pub fn fold_and_materialize(cache: &mut Cache, order: &HashMap<String, usize>) -> Result<()> {
+/// `chain`: HEAD's first-parent chain, oldest first.
+pub fn fold_and_materialize(repo: &Repo, cache: &mut Cache, chain: &[&CommitInfo]) -> Result<()> {
+    let order: HashMap<&str, usize> = chain
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.sha.as_str(), i))
+        .collect();
     let mut hunks = load_hunks(cache).context("loading hunks for cohort fold")?;
-    hunks.retain(|h| order.contains_key(&h.sha));
-    // Stable: a commit's hunks stay sorted by old_start.
-    hunks.sort_by_cached_key(|h| order[&h.sha]);
+    hunks.retain(|h| order.contains_key(h.sha.as_str()));
+    hunks.extend(merge_hunks(repo, cache, chain).context("diffing merges")?);
+    // Stable: a commit's hunks stay in file order.
+    hunks.sort_by_cached_key(|h| order[h.sha.as_str()]);
+    write_births(cache, &hunks)?;
     let by_file = group_by_file(&hunks);
 
     // Rebuild line_births from scratch — Phase 3 always full-rebuild.
@@ -90,6 +102,66 @@ pub fn fold_and_materialize(cache: &mut Cache, order: &HashMap<String, usize>) -
         }
         app.flush()?;
     }
+    Ok(())
+}
+
+/// Each chain merge's diff against its first parent.
+fn merge_hunks(repo: &Repo, cache: &Cache, chain: &[&CommitInfo]) -> Result<Vec<HunkRow>> {
+    let jobs: Vec<_> = chain
+        .iter()
+        .filter(|c| c.is_merge)
+        .map(|c| {
+            (
+                c.sha.clone(),
+                c.parents.first().and_then(|p| p.parse().ok()),
+            )
+        })
+        .collect();
+    let (diffs, failed) = churn::process_jobs(repo, &jobs);
+    if let Some((sha, err)) = failed.first() {
+        eprintln!(
+            "warning: {} merge(s) failed to diff, line_births will drift (first: {sha}: {err})",
+            failed.len()
+        );
+    }
+    let mut stmt = cache
+        .conn
+        .prepare("SELECT sha, bucket_key FROM commits WHERE is_merge")?;
+    let buckets: HashMap<String, i64> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<duckdb::Result<_>>()?;
+
+    let mut rows = Vec::new();
+    for (sha, diff) in diffs {
+        for h in diff.hunks {
+            rows.push(HunkRow {
+                sha: sha.clone(),
+                bucket_key: buckets[&sha],
+                path: h.path,
+                prev_path: h.prev_path,
+                old_start: h.old_start as i32,
+                old_len: h.old_len as i32,
+                new_start: h.new_start as i32,
+                new_len: h.new_len as i32,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// Rebuild `chain_births`: lines each chain commit added per path, the
+/// `born` that `line_births` survivors are measured against.
+fn write_births(cache: &Cache, hunks: &[HunkRow]) -> Result<()> {
+    let mut born: HashMap<(&str, &str), i64> = HashMap::new();
+    for h in hunks.iter().filter(|h| h.new_len > 0) {
+        *born.entry((&h.sha, &h.path)).or_default() += i64::from(h.new_len);
+    }
+    cache.conn.execute("DELETE FROM chain_births", [])?;
+    let mut app = cache.conn.appender("chain_births")?;
+    for ((sha, path), n) in born {
+        app.append_row(params![sha, path, n])?;
+    }
+    app.flush()?;
     Ok(())
 }
 
@@ -175,7 +247,7 @@ fn group_by_file(hunks: &[HunkRow]) -> Vec<(String, Vec<&HunkRow>)> {
 /// commit's hunks via `apply_commit`.
 fn fold_file(hunks: &[&HunkRow]) -> Vec<(String, i64)> {
     // Group consecutive same-sha hunks together while preserving the outer
-    // commit order (already sorted by fold rank).
+    // commit order (already sorted by chain position).
     let mut groups: Vec<(String, i64, Vec<&HunkRow>)> = Vec::new();
     for &h in hunks {
         if let Some((last_sha, _, group)) = groups.last_mut() {

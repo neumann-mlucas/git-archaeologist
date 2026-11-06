@@ -25,6 +25,7 @@ const TABLES: &[&str] = &[
     "file_stats",
     "funcs",
     "line_births",
+    "chain_births",
 ];
 
 #[derive(Parser, Debug)]

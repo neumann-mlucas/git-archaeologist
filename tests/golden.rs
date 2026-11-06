@@ -595,6 +595,7 @@ fn tier1_golden_integration() {
         "file_stats",
         "funcs",
         "line_births",
+        "chain_births",
     ];
     for table in TABLES {
         let p = out_dir.join(format!("{table}.parquet"));

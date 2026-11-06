@@ -413,13 +413,16 @@ across files.
 6. Group `hunks` by final (post-rename-follow) path.
 7. For each path, in parallel:
    - Walk the file's hunks in commit order along the first-parent chain.
-     (Today: all of HEAD's ancestry, parents before children, which drifts
-     on merges; see `known_drift_*` in `tests/scenarios.rs`.)
+     Each merge on the chain folds as its diff against its first parent
+     (not stored in `hunks`), so branch lines are born at the merge that
+     landed them and line counts match HEAD exactly.
    - Maintain a `Vec<sha>` — birth commit per line. Apply each hunk:
      splice out `old_len` entries at `old_start`, splice in `new_len`
      copies of the current commit's sha at `new_start`.
    - Emit final `(path, line_no, birth_sha, birth_bucket)` rows into
      `line_births`.
+   - Write lines added per (sha, path) to `chain_births`: `survival`'s
+     `born`, so survivors and births count the same commits.
 8. Update `meta.indexed_head_sha`, `meta.indexed_at`.
 
 Progress reported via stderr every 100 ms (phase + percentage + eta).
