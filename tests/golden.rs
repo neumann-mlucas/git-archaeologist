@@ -7,10 +7,14 @@
 //! goldens (via DuckDB EXCEPT, so parquet footer metadata + row order
 //! don't matter). Regenerate goldens with `REGEN_GOLDENS=1`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
+
+use common::truth;
 
 const BIN: &str = env!("CARGO_BIN_EXE_git-archaeologist");
 
@@ -418,6 +422,12 @@ fn tier1_golden_integration() {
         out.status.success(),
         "index failed: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+
+    // --- line_births agrees with git ---
+    truth::assert_line_counts(
+        &fx.repo,
+        &fx.arch_stdout(&["sql", truth::BIRTHS_SQL, "--format", "tsv"]),
     );
 
     // --- row invariants via sql ---

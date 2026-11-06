@@ -8,6 +8,7 @@
 #![allow(dead_code)] // Each test binary uses a subset of these helpers.
 
 pub mod dsl;
+pub mod truth;
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};

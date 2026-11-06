@@ -15,6 +15,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 use common::dsl::{self, Action};
+use common::truth;
 
 const BIN: &str = env!("CARGO_BIN_EXE_git-archaeologist");
 
@@ -73,6 +74,15 @@ impl Env {
             .nth(1)
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or_else(|| panic!("could not parse scalar from:\n{out}"))
+    }
+
+    fn births(&self) -> String {
+        self.arch_stdout(&["sql", truth::BIRTHS_SQL, "--format", "tsv"])
+    }
+
+    /// `line_births` equals `git blame` at HEAD, line for line.
+    fn assert_matches_git(&self) {
+        truth::assert_births(&self.repo, &self.births());
     }
 }
 
@@ -147,6 +157,7 @@ fn scenario_rename_chain() {
     let renames =
         env.sql_i64("SELECT COUNT(DISTINCT prev_path) FROM hunks WHERE prev_path IS NOT NULL");
     assert_eq!(renames, 2, "expected 2 distinct rename prev_path entries");
+    env.assert_matches_git();
 }
 
 /// Controlled cohort birth/death: three commits, three distinct cohorts,
@@ -226,6 +237,7 @@ fn scenario_cohort_survival() {
     // Total line_births rows = 5 (only surviving-line rows are materialized).
     let total = env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path='f.txt'");
     assert_eq!(total, 5, "expected 5 total line_births for f.txt");
+    env.assert_matches_git();
 }
 
 /// Raw git in the scenario repo with a fixed identity and date.
@@ -318,6 +330,7 @@ fn scenario_ref_scope() {
         "SELECT value FROM meta WHERE key = 'indexed_head_sha'",
     ]);
     assert_eq!(indexed.lines().nth(1), Some(head.as_str()));
+    env.assert_matches_git();
 }
 
 /// f.rs → g.rs, then a brand-new f.rs: the new file must not inherit the
@@ -362,6 +375,7 @@ fn scenario_path_reused_after_rename() {
         env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path = 'f.rs'"),
         1
     );
+    env.assert_matches_git();
 }
 
 fn one_commit(env: &Env, writes: &[(&str, &str)]) {
@@ -637,4 +651,69 @@ fn scenario_stats_rev_delta() {
         rows(&["--rev", "HEAD~1.."]),
         rows(&["--rev", "HEAD~1..HEAD"])
     );
+}
+
+/// Commit `body` to `path` on the current branch through raw git.
+fn commit_file(env: &Env, date: &str, path: &str, body: &str, msg: &str) {
+    std::fs::write(env.repo.join(path), body).unwrap();
+    git_at(env, date, &["add", path]);
+    git_at(env, date, &["commit", "-q", "-m", msg]);
+}
+
+fn numbered(n: usize) -> String {
+    (1..=n).map(|i| format!("line {i}\n")).collect()
+}
+
+/// Known drift: main edits `a.txt` after a branch renamed it, so the fold
+/// sees a new file at the old path and HEAD gains a ghost `a.txt`.
+#[test]
+#[ignore = "known drift: linear fold can't follow a rename across branches"]
+fn known_drift_rename_on_branch() {
+    let env = Env::new();
+    let d = |n: u32| format!("2025-01-0{n}T00:00:00Z");
+    git_at(&env, &d(1), &["init", "-q", "-b", "main"]);
+    commit_file(&env, &d(1), "a.txt", &numbered(30), "feat: base");
+    git_at(&env, &d(2), &["checkout", "-q", "-b", "side"]);
+    git_at(&env, &d(2), &["mv", "a.txt", "b.txt"]);
+    git_at(&env, &d(2), &["commit", "-q", "-m", "refactor: mv"]);
+    git_at(&env, &d(3), &["checkout", "-q", "main"]);
+    commit_file(
+        &env,
+        &d(3),
+        "a.txt",
+        &format!("top\n{}", numbered(30)),
+        "feat: edit",
+    );
+    git_at(
+        &env,
+        &d(4),
+        &["merge", "-q", "--no-ff", "side", "-m", "merge"],
+    );
+    env.arch_stdout(&["index"]);
+    truth::assert_line_counts(&env.repo, &env.births());
+}
+
+/// Known drift: a merge's own content has no hunks, so lines added while
+/// resolving it are missing from `line_births`.
+#[test]
+#[ignore = "known drift: merge commits are not diffed"]
+fn known_drift_evil_merge() {
+    let env = Env::new();
+    let d = |n: u32| format!("2025-01-0{n}T00:00:00Z");
+    git_at(&env, &d(1), &["init", "-q", "-b", "main"]);
+    commit_file(&env, &d(1), "f.txt", &numbered(5), "feat: base");
+    git_at(&env, &d(2), &["checkout", "-q", "-b", "side"]);
+    commit_file(&env, &d(2), "g.txt", "g\n", "feat: side");
+    git_at(&env, &d(3), &["checkout", "-q", "main"]);
+    commit_file(&env, &d(3), "h.txt", "h\n", "feat: main");
+    git_at(
+        &env,
+        &d(4),
+        &["merge", "-q", "--no-ff", "--no-commit", "side"],
+    );
+    std::fs::write(env.repo.join("f.txt"), numbered(9)).unwrap();
+    git_at(&env, &d(4), &["add", "f.txt"]);
+    git_at(&env, &d(4), &["commit", "-q", "-m", "merge side"]);
+    env.arch_stdout(&["index"]);
+    truth::assert_line_counts(&env.repo, &env.births());
 }
