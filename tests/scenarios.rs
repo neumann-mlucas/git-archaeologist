@@ -689,6 +689,35 @@ fn scenario_corrupt_cache_is_rebuilt() {
     assert_eq!(env.sql_i64("SELECT COUNT(*) FROM commits"), 1);
 }
 
+/// `age` bins floor: 4 days old is week 0, 8 days old is week 1.
+#[test]
+fn scenario_age_buckets_floor() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let days_ago = |d: u64| format!("{} +0000", now - d * 86400);
+    dsl::build(
+        &env.repo,
+        &[
+            Action::commit("Alice", &days_ago(8), "feat: old", &[("old.txt", "1\n")]),
+            Action::commit("Alice", &days_ago(4), "feat: new", &[("new.txt", "1\n")]),
+        ],
+    );
+    env.arch_stdout(&["index"]);
+    let out = env.arch_stdout(&["age", "--format", "tsv"]);
+    assert_eq!(
+        out.lines().skip(1).collect::<Vec<_>>(),
+        ["0\t1", "7\t1"],
+        "got:\n{out}"
+    );
+}
+
 /// Known drift: main edits `a.txt` after a branch renamed it, so the fold
 /// sees a new file at the old path and HEAD gains a ghost `a.txt`.
 #[test]

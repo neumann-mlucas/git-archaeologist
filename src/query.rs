@@ -207,8 +207,8 @@ pub fn age(cache: &Cache, filters: &Filters) -> Result<Table> {
              WHERE  fc.path IN (SELECT path FROM line_births) {path_filter} {lang_filter}
              GROUP  BY fc.path
          )
-         SELECT CAST((( {now} - ft.first_at ) / 86400 / 7) AS BIGINT) * 7 AS age_days_bucket,
-                COUNT(*)                                                   AS files
+         SELECT ({now} - ft.first_at) // (7 * 86400) * 7 AS age_days_bucket,
+                COUNT(*)                                 AS files
          FROM   first_touch ft
          {author_join}
          WHERE  1=1 {time_filter} {author_filter}
