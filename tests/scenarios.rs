@@ -664,6 +664,64 @@ fn numbered(n: usize) -> String {
     (1..=n).map(|i| format!("line {i}\n")).collect()
 }
 
+/// Commits sharing a timestamp (rebase, scripted imports) fold parent-first.
+/// Sorting by (time, sha) deletes `g.txt` before creating it, leaving a
+/// ghost file alive at HEAD.
+#[test]
+fn scenario_same_second_commits_fold_in_parent_order() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    let at = "2025-01-01T00:00:00Z";
+    let bodies: Vec<String> = (1..=6).map(|i| numbered(i * 3)).collect();
+    let mut actions: Vec<Action> = bodies
+        .iter()
+        .map(|b| Action::commit("Alice", at, "feat: grow", &[("f.txt", b)]))
+        .collect();
+    actions.push(Action::commit("Alice", at, "feat: g", &[("g.txt", "g\n")]));
+    actions.push(Action::delete("Alice", at, "chore: drop g", &["g.txt"]));
+    dsl::build(&env.repo, &actions);
+    env.arch_stdout(&["index"]);
+    env.assert_matches_git();
+}
+
+/// Clock skew: a child dated before its parent still folds after it.
+#[test]
+fn scenario_child_older_than_parent_folds_after_it() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    dsl::build(
+        &env.repo,
+        &[
+            Action::commit(
+                "Alice",
+                "2025-01-03T00:00:00Z",
+                "feat: a",
+                &[("f.txt", "a\n")],
+            ),
+            Action::commit(
+                "Alice",
+                "2025-01-02T00:00:00Z",
+                "feat: b",
+                &[("f.txt", "a\nb\n")],
+            ),
+            Action::commit(
+                "Alice",
+                "2025-01-01T00:00:00Z",
+                "feat: c",
+                &[("f.txt", "a\nb\nc\n")],
+            ),
+        ],
+    );
+    env.arch_stdout(&["index"]);
+    env.assert_matches_git();
+}
+
 /// A corrupt cache is rebuilt: DuckDB's checksum error says "in block at",
 /// which must not read as the "Could not set lock" of a cache in use.
 #[test]

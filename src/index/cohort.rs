@@ -21,7 +21,7 @@
 //!   non-merge commit.
 //! - Serial. Rayon parallelism across files is a v1.x perf follow-up.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use duckdb::params;
@@ -55,11 +55,13 @@ impl HunkRow {
     }
 }
 
-/// `on_head`: shas reachable from HEAD. `line_births` describes HEAD's
-/// files, so hunks from unmerged branches are excluded.
-pub fn fold_and_materialize(cache: &mut Cache, on_head: &HashSet<String>) -> Result<()> {
+/// `order`: fold rank of every sha reachable from HEAD. `line_births`
+/// describes HEAD's files, so hunks from unmerged branches are excluded.
+pub fn fold_and_materialize(cache: &mut Cache, order: &HashMap<String, usize>) -> Result<()> {
     let mut hunks = load_hunks(cache).context("loading hunks for cohort fold")?;
-    hunks.retain(|h| on_head.contains(&h.sha));
+    hunks.retain(|h| order.contains_key(&h.sha));
+    // Stable: a commit's hunks stay sorted by old_start.
+    hunks.sort_by_key(|h| order[&h.sha]);
     let by_file = group_by_file(&hunks);
 
     // Rebuild line_births from scratch — Phase 3 always full-rebuild.
@@ -98,7 +100,7 @@ fn load_hunks(cache: &Cache) -> Result<Vec<HunkRow>> {
          FROM   hunks h
          JOIN   commits c ON c.sha = h.sha
          WHERE  c.is_merge = FALSE
-         ORDER  BY c.authored_at ASC, h.sha ASC, h.old_start ASC",
+         ORDER  BY h.sha ASC, h.old_start ASC",
     )?;
     let iter = stmt.query_map([], |r| {
         Ok(HunkRow {
@@ -172,7 +174,7 @@ fn group_by_file(hunks: &[HunkRow]) -> Vec<(String, Vec<&HunkRow>)> {
 /// commit's hunks via `apply_commit`.
 fn fold_file(hunks: &[&HunkRow]) -> Vec<(String, i64)> {
     // Group consecutive same-sha hunks together while preserving the outer
-    // commit order (already sorted by authored_at, sha).
+    // commit order (already sorted by fold rank).
     let mut groups: Vec<(String, i64, Vec<&HunkRow>)> = Vec::new();
     for &h in hunks {
         if let Some((last_sha, _, group)) = groups.last_mut() {

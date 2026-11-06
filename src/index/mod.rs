@@ -6,7 +6,8 @@ pub mod parse;
 pub mod treesitter;
 pub mod walker;
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use duckdb::params;
@@ -379,8 +380,8 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     eprintln!("cohort fold…");
     // `line_births` = lines alive at HEAD, so only HEAD's ancestry folds;
     // unmerged branches would splice foreign hunks into HEAD's files.
-    let on_head = ancestry(&all_commits, &head);
-    cohort::fold_and_materialize(cache, &on_head).context("cohort fold")?;
+    let order = head_order(&all_commits, &head);
+    cohort::fold_and_materialize(cache, &order).context("cohort fold")?;
 
     // Recreate line_births indexes after the fold's bulk insert.
     cache.conn.execute_batch(
@@ -391,23 +392,56 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
     Ok(())
 }
 
-/// Every sha reachable from `head` through the in-memory parent graph.
-fn ancestry(commits: &[CommitInfo], head: &str) -> HashSet<String> {
-    let parents: std::collections::HashMap<&str, &[String]> = commits
+/// Fold rank of every sha reachable from `head`: parents always before
+/// children, whatever their timestamps say; otherwise walk order
+/// (`commits` is oldest-first). Timestamps alone can't order commits:
+/// rebases share a second, clocks skew.
+fn head_order(commits: &[CommitInfo], head: &str) -> HashMap<String, usize> {
+    let pos: HashMap<&str, usize> = commits
         .iter()
-        .map(|c| (c.sha.as_str(), c.parents.as_slice()))
+        .enumerate()
+        .map(|(i, c)| (c.sha.as_str(), i))
         .collect();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut stack = vec![head];
-    while let Some(sha) = stack.pop() {
-        if !seen.insert(sha.to_string()) {
-            continue;
-        }
-        if let Some(ps) = parents.get(sha) {
-            stack.extend(ps.iter().map(String::as_str));
+    let parents = |i: usize| {
+        commits[i]
+            .parents
+            .iter()
+            .filter_map(|p| pos.get(p.as_str()).copied())
+    };
+
+    let mut reachable: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = pos.get(head).copied().into_iter().collect();
+    while let Some(i) = stack.pop() {
+        if reachable.insert(i) {
+            stack.extend(parents(i));
         }
     }
-    seen
+
+    // Kahn's algorithm, the heap picking the oldest ready commit.
+    let mut waiting_on = vec![0usize; commits.len()];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); commits.len()];
+    for &i in &reachable {
+        for p in parents(i) {
+            waiting_on[i] += 1;
+            children[p].push(i);
+        }
+    }
+    let mut ready: BinaryHeap<Reverse<usize>> = reachable
+        .iter()
+        .filter(|&&i| waiting_on[i] == 0)
+        .map(|&i| Reverse(i))
+        .collect();
+    let mut rank = HashMap::with_capacity(reachable.len());
+    while let Some(Reverse(i)) = ready.pop() {
+        rank.insert(commits[i].sha.clone(), rank.len());
+        for &c in &children[i] {
+            waiting_on[c] -= 1;
+            if waiting_on[c] == 0 {
+                ready.push(Reverse(c));
+            }
+        }
+    }
+    rank
 }
 
 fn wipe_data(cache: &Cache) -> Result<()> {
@@ -495,7 +529,7 @@ pub fn snapshot(repo: &Repo, cache: &Cache, sha: Option<&str>, name: &str) -> Re
 }
 
 /// sha → (bucket_key, is_sampled) for every indexed commit.
-fn stored_plans(cache: &Cache) -> Result<std::collections::HashMap<String, (i64, bool)>> {
+fn stored_plans(cache: &Cache) -> Result<HashMap<String, (i64, bool)>> {
     let mut stmt = cache
         .conn
         .prepare("SELECT sha, bucket_key, is_sampled FROM commits")?;
