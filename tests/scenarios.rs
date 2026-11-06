@@ -722,6 +722,68 @@ fn scenario_child_older_than_parent_folds_after_it() {
     env.assert_matches_git();
 }
 
+/// Rewritten history: the amended-away commit leaves every table, so an
+/// incremental `index` agrees with a fresh `reindex`.
+#[test]
+fn scenario_amended_commit_leaves_no_orphans() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    git_at(&env, "2025-01-01T00:00:00Z", &["init", "-q", "-b", "main"]);
+    commit_file(
+        &env,
+        "2025-01-01T00:00:00Z",
+        "a.rs",
+        "fn a() {}\n",
+        "feat: one",
+    );
+    commit_file(
+        &env,
+        "2025-01-02T00:00:00Z",
+        "a.rs",
+        "fn a() {}\nfn b() {}\n",
+        "feat: two",
+    );
+    let gone = git_at(&env, "2025-01-02T00:00:00Z", &["rev-parse", "HEAD"]);
+    env.arch_stdout(&["index"]);
+
+    std::fs::write(env.repo.join("a.rs"), "fn a() {}\nfn c() {}\nfn d() {}\n").unwrap();
+    git_at(&env, "2025-01-03T00:00:00Z", &["add", "a.rs"]);
+    git_at(
+        &env,
+        "2025-01-03T00:00:00Z",
+        &["commit", "-q", "--amend", "-m", "feat: two amended"],
+    );
+    env.arch_stdout(&["index"]);
+
+    for table in [
+        "commits",
+        "commit_parents",
+        "commit_trailers",
+        "tags",
+        "hunks",
+        "file_churn",
+        "file_stats",
+        "funcs",
+    ] {
+        assert_eq!(
+            env.sql_i64(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE sha = '{gone}'"
+            )),
+            0,
+            "orphan rows left in {table}"
+        );
+    }
+    let totals = "SELECT (SELECT COUNT(*) FROM commits) * 1000 + SUM(added) FROM file_churn";
+    let incremental = env.sql_i64(totals);
+    assert_eq!(incremental, 2003);
+    env.arch_stdout(&["reindex"]);
+    assert_eq!(incremental, env.sql_i64(totals));
+    env.assert_matches_git();
+}
+
 /// A corrupt cache is rebuilt: DuckDB's checksum error says "in block at",
 /// which must not read as the "Could not set lock" of a cache in use.
 #[test]

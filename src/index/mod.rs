@@ -82,6 +82,13 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
         }
     }
 
+    // Rewritten history: stored commits no ref reaches anymore.
+    let live: HashSet<&str> = all_commits.iter().map(|c| c.sha.as_str()).collect();
+    let orphans: Vec<&String> = already
+        .iter()
+        .filter(|s| !live.contains(s.as_str()))
+        .collect();
+
     let total = all_commits.len();
     let sampled_count = assignments.iter().filter(|a| a.is_sampled).count();
     // Direct stderr line every 100ms + at start/end — only visible signal
@@ -126,6 +133,27 @@ pub fn run(repo: &Repo, cache: &mut Cache, opts: IndexOptions) -> Result<()> {
          DROP INDEX IF EXISTS idx_line_births_bucket;
          DROP INDEX IF EXISTS idx_line_births_path;",
     )?;
+    if !orphans.is_empty() {
+        cache
+            .conn
+            .execute_batch("CREATE OR REPLACE TEMP TABLE orphan (sha TEXT)")?;
+        let mut app = cache.conn.appender("orphan")?;
+        for sha in &orphans {
+            app.append_row(params![sha])?;
+        }
+        drop(app);
+        cache.conn.execute_batch(
+            "DELETE FROM funcs           WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM file_stats      WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM file_churn      WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM hunks           WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM tags            WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM commit_trailers WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM commit_parents  WHERE sha IN (SELECT sha FROM orphan);
+             DELETE FROM commits         WHERE sha IN (SELECT sha FROM orphan);
+             DROP TABLE orphan;",
+        )?;
+    }
     if !stale.is_empty() {
         cache.conn.execute_batch(
             "CREATE OR REPLACE TEMP TABLE plan_fix (sha TEXT, bucket_key BIGINT, is_sampled BOOLEAN)",
