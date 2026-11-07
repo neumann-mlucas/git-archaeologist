@@ -344,11 +344,14 @@ Ranked:
    (blob, language) once, plus a (sha, path, blob) map; queries join
    through it. Cuts cache and insert cost together. Needs a schema bump
    - golden regen.
-3. **Indexes.** ratatui tables total ~31 MB of a 147 MB file; the rest
-   is (likely) the 12 secondary indexes + 4 text PKs. Measure by
-   copying tables into an index-free DB; drop indexes no query plan
-   uses (DuckDB zonemaps cover range filters), drop PKs the appender
-   path never relies on. ~15% index time on uv.
+3. **Indexes (biggest cache win).** Copying every table into an
+   index-free DB: ratatui 148 → 29 MB, uv 174 → 41 MB, godot 1029 →
+   258 MB. The 12 secondary indexes + 4 text PKs are 75–80% of the
+   file. DuckDB uses ART indexes only for point lookups and constraint
+   checks; scans and joins run on zonemaps + hash joins. Drop the
+   secondary indexes (and the PKs the appender path never relies on),
+   then rerun `just bench` query timings to catch any lookup that
+   needed one. Also ~15% index time on uv.
 4. **Rename limit.** 1M pairs costs ~20% on uv. Try 1000 per side
    (git's real `diff.renameLimit` semantics: sources × destinations ≤
    1000²) only on commits with > N adds+deletes; keep
