@@ -9,11 +9,12 @@ a green gate before the next starts.
 
 ## Decisions
 
-- **Grammars.** Built-in set = 23 (SPEC §Language stack). Phase 0
+- **Grammars.** Built-in set = 21 (SPEC §Language stack). Phase 0
   cut back to Core 7 to shake out the pipeline; commit `de8a04c`
   re-expanded to 20 once the +1 MB/grammar cost proved cheap; Kotlin,
-  C#, Swift added later. 30+ more languages get line counts with no
-  grammar (`Parse::Plain`).
+  C#, Swift added later; Markdown and JSON dropped to `Parse::Plain`
+  (their grammars extracted nothing). 30+ more languages get line
+  counts with no grammar.
 - **Blame.** Deferred to v1.2. Delete `src/index/blame.rs`, the `blame`
   table, and every query that touches it. No preview gate.
 - **Cache migration.** Auto-nuke stale caches on first v1 run; log one
@@ -333,12 +334,29 @@ file_stats / funcs saves ~15% (251 → 215 s). Neither explains the decay.
 
 Ranked:
 
-1. **Snapshot parsing (biggest).** `treesitter::batch_sampled` re-parses
-   each sampled commit's whole tree; blob dedup is per chunk only.
-   Keep one `(oid, language) → CachedParse` map across chunks (bounded
-   LRU if RSS needs it), and parse only blobs not seen before. Same
-   blobs dominate consecutive samples, so cost should track changed
-   files, not tree size. Verify: uv chunk `ts` flat; godot < 30 min.
+1. **Snapshot parsing (biggest).** Measured on uv (2026-11-07):
+   - It is parse CPU, not blob reads: per chunk, `find_blob` ≤ 2 s,
+     parse up to 98 s CPU (≈ 13 s wall over 8 threads).
+   - The hot files are big and change between every sample:
+     `crates/uv-cli/src/lib.rs` parsed 106 times, each a different
+     blob. Dedup can't remove that work. Rust is ~70% of slow-parse
+     time, Markdown ~23%, JSON ~6%.
+   - Parsing scales to ~4 threads on this 4-core / 8-thread laptop
+     (per-parse time 2.7× at 8 threads), but capping rayon at 4 is
+     slower overall (168 s vs 137 s). Keep the default.
+   - **Done:** Markdown + JSON counted by `Parse::Plain` (their
+     grammars extracted nothing): uv 160 → 137 s, identical counts on
+     uv and ratatui.
+   - **Written, unmeasured:** keep the previous chunk's parses so
+     unchanged files at a chunk boundary aren't re-parsed (bounded to
+     one chunk). Only saves unchanged, mostly small files; benchmark
+     on a quiet machine before committing.
+   - Next, by expected payoff: fewer sampled commits by default
+     (cost is per sample: uv weekly = 149 samples, godot monthly =
+     129 of a 1M-line tree); tree-sitter incremental re-parse from the
+     previous sample's tree for changed files (`Tree::edit` with the
+     diff's hunks; the big win, most code).
+     Verify: godot < 30 min.
 2. **Snapshot storage.** `file_stats` + `funcs` store a full copy per
    sampled commit (ratatui: 1.27M `funcs` rows). Store a row per
    (blob, language) once, plus a (sha, path, blob) map; queries join
@@ -501,7 +519,7 @@ reasoning.
   (default 1); flag only, no config default.
 - Bundled DuckDB compile path for users — `cargo dist` prebuilt
   binaries instead (CI still builds with `bundled-duckdb`).
-- 19-grammar-then-shrink cycle — now 23 grammars built in
+- 19-grammar-then-shrink cycle — now 21 grammars built in
   (SPEC §Language stack); Phase 0's 7-grammar interim is history.
 - `unmerged_candidates` heuristic + AliasMerge modal — static
   `aliases.toml` covers it.
