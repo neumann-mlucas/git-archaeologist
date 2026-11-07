@@ -316,19 +316,51 @@ Cohort was scanning 800k `line_births` rows through a per-bucket range
 join; rewrote to pre-aggregate one row per cohort then cross-join with
 the bucket universe.
 
-### Still open (v1.x)
+### Perf plan (measured 2026-11-07, 15 GB / 8-core laptop, one job at a time)
 
-- SPEC 10k-commit target = 90 s. We linearly extrapolate from ratatui
-  to ~105 s — close but not there. Realistic lever is either
-  producer/consumer pipeline (churn+ts compute overlapping with insert
-  loop) or reducing per-commit constant cost (Appender bind overhead).
-- Cache size at 10k linearly = ~570 MB, still over the SPEC 200 MB
-  bar. Big win would be dropping hex-string SHAs for the 20-byte
-  binary form.
-- Cohort query 530 ms is right at the SPEC 500 ms bar — either accept
-  or materialize the (bucket, cohort) grid at index time.
-- Validate against `astral-sh/uv` (~15 k commits) and `godotengine/godot`
-  (~60 k) via Tier 3 harness. Both fixtures are already in the plan.
+| fixture | commits | index            | peak RSS | cache    |
+| ------- | ------- | ---------------- | -------- | -------- |
+| ratatui | 2,589   | 38.5 s           | 563 MB   | 149 MB   |
+| uv      | 13,164  | 213 s            | 889 MB   | 175 MB   |
+| godot   | ~60k    | 4,158 s (69 min) | 3.0 GB   | 1,029 MB |
+
+Godot misses every Tier 3 gate (30 min, 2 GB). uv regressed from the
+107 s recorded earlier. Per-chunk timers on uv (1000 commits/chunk):
+tree-sitter snapshots 1.8 s → 14 s per chunk and dominate; diff
+1.5–5.6 s; insert + flush ≤ 4 s. A/B on uv: rename limit 1M → 1k saves
+~20% (251 → 202 s); dropping the PKs on commits / file_churn /
+file_stats / funcs saves ~15% (251 → 215 s). Neither explains the decay.
+
+Ranked:
+
+1. **Snapshot parsing (biggest).** `treesitter::batch_sampled` re-parses
+   each sampled commit's whole tree; blob dedup is per chunk only.
+   Keep one `(oid, language) → CachedParse` map across chunks (bounded
+   LRU if RSS needs it), and parse only blobs not seen before. Same
+   blobs dominate consecutive samples, so cost should track changed
+   files, not tree size. Verify: uv chunk `ts` flat; godot < 30 min.
+2. **Snapshot storage.** `file_stats` + `funcs` store a full copy per
+   sampled commit (ratatui: 1.27M `funcs` rows). Store a row per
+   (blob, language) once, plus a (sha, path, blob) map; queries join
+   through it. Cuts cache and insert cost together. Needs a schema bump
+   - golden regen.
+3. **Indexes.** ratatui tables total ~31 MB of a 147 MB file; the rest
+   is (likely) the 12 secondary indexes + 4 text PKs. Measure by
+   copying tables into an index-free DB; drop indexes no query plan
+   uses (DuckDB zonemaps cover range filters), drop PKs the appender
+   path never relies on. ~15% index time on uv.
+4. **Rename limit.** 1M pairs costs ~20% on uv. Try 1000 per side
+   (git's real `diff.renameLimit` semantics: sources × destinations ≤
+   1000²) only on commits with > N adds+deletes; keep
+   `scenario_mass_rename_with_edits_keeps_births` green.
+5. **Memory.** `tune` sets DuckDB `memory_limit = 12GB` on a 15 GB
+   host; godot peaks at 3 GB RSS but two concurrent jobs OOM-killed the
+   machine. Default to min(12 GB, 50% RAM), config override.
+6. **Cohort query (530 ms vs 500 ms).** Output is buckets × cohorts
+   (~N²/2 rows); likely output-bound. Not profiled. Accept, or default
+   `cohort` to coarser buckets.
+7. **Pre-walk.** 5–15 s before the first commit on uv (rev walk +
+   bucket assignment), cold vs warm page cache. Low priority.
 
 ### Ponytail debt (deliberate shortcuts with named upgrade paths)
 
