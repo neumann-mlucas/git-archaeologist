@@ -4,7 +4,7 @@
 //! (rename, merge, revert, `Co-authored-by:`, `feat!:`, tag,
 //! `.git-blame-ignore-revs`) and asserts every subcommand runs, row-count
 //! invariants hold, and the exported parquet tables set-equal checked-in
-//! goldens (via DuckDB EXCEPT, so parquet footer metadata + row order
+//! goldens (via DuckDB EXCEPT ALL, so parquet footer metadata + row order
 //! don't matter). Regenerate goldens with `REGEN_GOLDENS=1`.
 
 mod common;
@@ -607,10 +607,10 @@ fn tier1_golden_integration() {
         );
     }
 
-    // --- byte-exact goldens (set-diff via DuckDB EXCEPT) ---
+    // --- byte-exact goldens (multiset diff via DuckDB EXCEPT ALL) ---
     // Fixture is fully deterministic: pinned author/committer dates,
     // pinned names/emails, serial rev-walk => stable SHAs, stable
-    // author ids, stable row content. Compare via symmetric EXCEPT so
+    // author ids, stable row content. Compare via symmetric EXCEPT ALL (duplicates count) so
     // row order and parquet footer metadata are ignored.
     //
     // Regenerate after intentional schema/output changes:
@@ -644,9 +644,9 @@ fn tier1_golden_integration() {
         );
         let q = format!(
             "SELECT COUNT(*)::BIGINT AS n FROM (\
-               (SELECT * FROM read_parquet('{g}') EXCEPT SELECT * FROM read_parquet('{n}'))\
+               (SELECT * FROM read_parquet('{g}') EXCEPT ALL SELECT * FROM read_parquet('{n}'))\
                UNION ALL\
-               (SELECT * FROM read_parquet('{n}') EXCEPT SELECT * FROM read_parquet('{g}'))\
+               (SELECT * FROM read_parquet('{n}') EXCEPT ALL SELECT * FROM read_parquet('{g}'))\
              )",
             g = gold_p.display(),
             n = new_p.display(),
@@ -677,7 +677,7 @@ fn report_drift(fx: &Fixture, table: &str, gold_p: &Path, new_p: &Path) -> Strin
     let new_only = fx.arch_stdout(&[
         "sql",
         &format!(
-            "SELECT * FROM (SELECT * FROM read_parquet('{n}') EXCEPT SELECT * FROM read_parquet('{g}')) LIMIT 10"
+            "SELECT * FROM (SELECT * FROM read_parquet('{n}') EXCEPT ALL SELECT * FROM read_parquet('{g}')) LIMIT 10"
         ),
         "--format",
         "table",
@@ -685,7 +685,7 @@ fn report_drift(fx: &Fixture, table: &str, gold_p: &Path, new_p: &Path) -> Strin
     let gold_only = fx.arch_stdout(&[
         "sql",
         &format!(
-            "SELECT * FROM (SELECT * FROM read_parquet('{g}') EXCEPT SELECT * FROM read_parquet('{n}')) LIMIT 10"
+            "SELECT * FROM (SELECT * FROM read_parquet('{g}') EXCEPT ALL SELECT * FROM read_parquet('{n}')) LIMIT 10"
         ),
         "--format",
         "table",
