@@ -38,7 +38,7 @@ Answers questions like:
 - Output = parquet dump + subcommand-per-metric emitting TSV/CSV/JSON on
   stdout for piping.
 - Function-level metrics for the tree-sitter languages linked in
-  (§Language stack: Core 9 full + Extended 11 best-effort).
+  (§Language stack: 23 grammars), line counts for 30+ more without one.
 
 ### Explicitly out of scope (v1)
 
@@ -68,7 +68,9 @@ metric = new query. No new Rust code per metric.
    hunk-level attribution.
 4. **Survival curve (Kaplan-Meier)** — % of lines from cohort N still
    alive at age T. Optional exponential fit → half-life scalar per repo
-   (gated on ≥ 100 deletion events, else NULL + `reason`).
+   (gated on ≥ 100 deletion events and ≥ 2 partly-dead cohorts, else
+   NULL + `reason`). Age is in days, from each bucket's last commit
+   time, so the half-life is in days whatever the bucket size.
 5. **Coupling matrix** — top-N file pairs by co-occurrence in commits.
    Cheap self-join on `(sha, path)`. `--max-files-per-commit N` (default
    50) drops squash/import commits from the count.
@@ -77,9 +79,9 @@ metric = new query. No new Rust code per metric.
    revert rate, breaking-change rate per bucket.
 7. **File age histogram** — bucketed `now − first_touched_at` per path in
    scope.
-8. **Churn per module** — sum of `+lines`/`-lines` per top-level
-   directory per bucket. Module = first path segment; no configurable
-   depth in v1.
+8. **Churn per module** — sum of `+lines`/`-lines` per directory per
+   bucket. Module = first `--depth N` path segments (default 1); paths
+   with fewer segments keep their full path.
 
 ### Function-level (tree-sitter langs only — §Language stack)
 
@@ -94,9 +96,12 @@ Fallback: any file under `tests/`, `__tests__/`, `*.test.{js,ts,jsx,tsx}`,
 counts as test.
 
 9. **Function hotspot** — churn per top-level def per bucket. Sort desc,
-   surface top N.
+   surface top N. A hunk is credited to the def (in the file's latest
+   snapshot) whose line span holds the hunk's first new line: cheap,
+   approximate for old hunks once lines shift.
 10. **Function cohort** — birth bucket of each top-level def. Enables
-    "% of functions from era X still present".
+    "% of functions from era X still present". Not a subcommand: `sql`
+    over `funcs` + `commits`.
 11. **Test-vs-code split** — attribute lines to `test` or `code` based on
     function/type attributes (`#[test]`, `def test_*`, `@Test`, etc.),
     not path heuristics.
@@ -117,7 +122,13 @@ Bucket sizes:
 | 5k – 50k     | week           |
 | > 50k        | month          |
 
-Overrides: `--bucket [auto|commit|day|week|month|tag]`.
+Overrides: `--bucket [auto|commit|day|week|month|tag]`, applied at index
+time (`index --bucket X` re-keys the cache in place). On a query the flag
+only applies when that query triggers the first index; otherwise the
+query warns that the cache is bucketed differently.
+
+Keys: commit = unix seconds, day = YYYYMMDD, week = ISO YYYYWW, month =
+YYYYMM, tag = tag index.
 
 `tag` is new: bucket boundary = each annotated/lightweight tag reachable
 from HEAD, sorted by tagger date. Enables "burndown per release" without
@@ -141,10 +152,11 @@ Everything the prior spec ignored:
 - **Commit message prefix** — Conventional Commit `type[!]:` extracted
   into `commits.msg_type` + `commits.is_breaking`.
 - **Tags** — `refs/tags/*` walked, stored in `tags` table.
-- **`.git-blame-ignore-revs`** — read at index time; commits listed are
-  excluded from ownership attribution.
-- **Commit timezone offset** — stored separately from unix timestamp so
-  per-author-local hour-of-day is queryable.
+- **`.git-blame-ignore-revs`** — read at index time; listed commits get
+  `commits.ignored_blame = true`. No report uses the flag yet: `stats`
+  ownership still credits them.
+- **Commit timezone offset** — not stored; `authored_at` is UTC unix
+  seconds (committer time).
 - **File mode + binary detection** — symlinks, submodules, binaries
   skipped in line counting.
 
@@ -158,10 +170,11 @@ common ones as flags:
 - `--author name-substring` (matches canonical name or email)
 - `--path prefix/`
 
-No `--exclude` and no `--module-depth` in v1. Both add configuration
-surface for the smallest fraction of users; `sql` covers exclusion
-(`WHERE path NOT LIKE 'vendor/%'`), and module = first path segment is
-the fixed rule. Anything more exotic → `git-arch sql "SELECT ..."`.
+No `--exclude` in v1: `sql` covers exclusion
+(`WHERE path NOT LIKE 'vendor/%'`). Module depth is `churn --depth N`.
+Anything more exotic → `git-arch sql "SELECT ..."`.
+
+`--from` / `--to` are inclusive UTC days on `commits.authored_at`.
 
 ## Author normalization
 
@@ -175,34 +188,34 @@ the fixed rule. Anything more exotic → `git-arch sql "SELECT ..."`.
 
 `aliases.toml` schema unchanged from prior spec.
 
-## Language stack — tree-sitter, 20 grammars
+## Language stack — 23 grammars, plus line counts without one
 
-V1 grammars linked in statically:
+Grammars linked in statically (`src/index/treesitter.rs`, `LangRegistry`):
 
-**Core 9** — full function-level extraction:
+**Full** — comments, functions, test regions: Rust, Python, JavaScript,
+TypeScript (`.ts` + `.tsx`), Go, C++, Java, Ruby, PHP. C (`.c` + `.h`) too,
+but with path-rule tests only.
 
-- Rust
-- Python
-- JavaScript
-- TypeScript (covers `.ts` + `.tsx`)
-- Go
-- C (covers `.c` + `.h`)
-- C++
-- Lua
-- Vim Script
+**Best-effort functions** (conventional node names, path-rule tests
+only): Lua, Vim Script, Bash, OCaml, Scala, Haskell, Kotlin, C#, Swift.
 
-**Extended 11** — full comment / LOC extraction; function extraction is
-best-effort using conventional node names:
+**Lines only** (grammar, no functions): HTML, CSS, JSON, Markdown.
 
-- Java, Ruby, Bash, HTML, CSS, JSON, PHP, OCaml, Scala, Haskell,
-  Markdown
+**No grammar** — `Parse::Plain`: comments by line prefix and block
+delimiters, double-quoted strings skipped; lines only. Labels follow
+tokei: YAML, TOML, XML, INI, Dockerfile, Makefile, CMake, SQL, Protocol
+Buffers, Nix, HCL, Sass, LESS, Vue, Svelte, Perl, R, Julia, Elixir,
+Erlang, Dart, Zig, Objective-C, Objective-C++, Groovy, Gradle,
+PowerShell, GLSL, GDScript, PO File, Fish, Zsh, Nushell,
+ReStructuredText.
 
 Non-negotiables:
 
-- Detection: extension → language. No content sniffing.
-- Files whose extension isn't in the registry fall back to an
-  extension-map heuristic (single-line comment prefix + block delimiters
-  by ext) so burndown-by-language keeps working.
+- Detection: exact file name (`Makefile`, `Dockerfile`, `CMakeLists.txt`)
+  then extension. No content sniffing.
+- Anything else (`.txt`, extensionless files, unknown extensions) has no
+  `file_stats` row: it counts in `line_births` and shows as `other` in
+  `stats`, but not in `burndown --by language`.
 
 Post-v1 additions still land as pure adds — each new grammar is a
 Cargo line + a `LangSpec` entry, does not slow default build meaningfully
@@ -411,7 +424,7 @@ stateful fold on each file's line-array in commit order. It IS parallel
 across files.
 
 6. Group `hunks` by final (post-rename-follow) path.
-7. For each path, in parallel:
+7. For each path, in parallel (rayon):
    - Walk the file's hunks in commit order along the first-parent chain.
      Each merge on the chain folds as its diff against its first parent
      (not stored in `hunks`), so branch lines are born at the merge that
@@ -430,8 +443,8 @@ Progress reported via stderr every 100 ms (phase + percentage + eta).
 Incremental reindex: skip SHAs already in `commits`, and purge stored
 commits no ref reaches anymore (rebase, amend, deleted branch). Tail bucket may
 promote a newly-added commit to sampled — re-run tree-sitter for that
-single bucket only. Cohort fold reruns only for files whose hunk set
-changed (new commits touched them).
+single bucket only. The cohort fold is rebuilt in full on every run
+(incremental fold: TASKS, deferred).
 
 ## CLI surface
 
@@ -451,6 +464,7 @@ SUBCOMMANDS
     hotspot               top-N funcs by churn (tree-sitter langs only)
     age                   file age histogram
     churn                 churn per module / lang / author over time
+    stats                 tokei-style HEAD snapshot (or --rev C | A..B)
 
 COMMON FLAGS
     --from DATE  --to DATE
@@ -459,12 +473,14 @@ COMMON FLAGS
     --author SUBSTR
     --path PREFIX
     --format [tsv|csv|json|table]
-    --by [language|author|module|cohort]
+    --by [language|author|module|kind]   (burndown, churn)
 
 SUBCOMMAND-SPECIFIC
     coupling  --max-files-per-commit N   (default 50)
     survival  --fit exp                  (min 100 deletion events)
-    hotspot   --top N   --lang L
+    hotspot   --top N   --lang L         (--lang required)
+    churn     --depth N                  (default 1)
+    stats     --by lang|dir|file --depth N [--rev C | --rev A..B]
 ```
 
 ## Perf targets
@@ -481,8 +497,14 @@ exist.
 
 ## Test strategy
 
-Four tiers, ordered by cost. CI runs the first two on every push; the
-lower two are opt-in / weekly.
+Four tiers, ordered by cost. CI runs the first two (plus fmt +
+clippy) on every push. Everything runs locally through the `justfile`:
+`just test` (tiers 0-1.x), `just e2e` (tier 2), `just bench` (tier 3),
+`just lint`.
+
+Independent oracles, in `tests/common/truth.rs`: line births per file
+against `git`, birth commits against `git blame --first-parent`, code +
+blanks per language against `tokei`.
 
 ### Tier 0 — unit (fast, `cargo test`)
 
@@ -500,19 +522,30 @@ Per-module. Sub-second.
 
 ### Tier 1 — golden repo integration (fast, `cargo test`)
 
-A hand-built tiny repo lives at `tests/data/golden/` (or is built at test
-time via `tempfile` + system `git`). Bit-exact assertions on every
-metric.
+A hand-built tiny repo, built at test time via `tempfile` + system `git`
+with pinned identities and dates (stable SHAs).
 
 - 3-author, 7-language, 30-commit fixture with known truths:
   - Includes a rename, a merge, a revert, a `Co-authored-by:` trailer,
     a Conventional Commit `feat!:`, a tag, and a `.git-blame-ignore-revs`
     entry.
-- For every subcommand (`burndown`, `cohort`, `survival`, `coupling`,
-  `classify`, `hotspot`, `age`, `churn`, `sql`) — snapshot of stdout
-  compared byte-for-byte against a checked-in golden `.tsv`.
-- End-to-end: `git-arch index && git-arch export parquet /tmp/x` →
-  DuckDB reopens the parquet → row counts match.
+- Every subcommand and every filter combination exits 0 with output.
+- `export parquet`, then each of the 13 tables must equal its checked-in
+  golden in `tests/goldens/` as a multiset (DuckDB `EXCEPT ALL` both
+  ways: row order ignored, duplicates count). Drift prints the differing
+  rows. `just regen-goldens` rewrites them.
+
+### Tier 1.x — scenarios (fast, `cargo test`)
+
+`tests/scenarios.rs`: one small synthetic repo per invariant, exact
+assertions. Covers query outputs (survival, fit, coupling cap, hotspot,
+churn depth, burndown by kind, classify edge cases), bucket keys per
+size, date filters, mailmap + trailers, `.git-blame-ignore-revs`, odd
+files (CRLF, no final newline, empty, unicode paths, case-only rename,
+gitlink, file↔dir), unusual history (evil / octopus / criss-cross /
+unrelated-root merges, rename on a branch, same-second commits, clock
+skew, rewritten history), cache corruption and locking, and bare /
+detached / shallow repos.
 
 ### Tier 2 — small public repo smoke (opt-in, `cargo test --features e2e`)
 
@@ -522,20 +555,23 @@ Correctness bounds are strict but not bit-exact (upstream evolves).
 - Fixture: `ratatui-org/ratatui` (small, active, polyglot-ish — Rust
   primarily, ~5k commits, ~300 contributors, actively adds features).
 - Assertions:
-  - `git rev-list --count HEAD` == `commits` table row count.
-  - Total code lines within ±1% of `tokei --output json .`.
+  - `commits` row count ≥ `git rev-list --count HEAD` (all refs walked).
+  - Line births per file equal `git`; ≥ 95% of sampled lines match
+    `git blame --first-parent`.
+  - Code + blanks for Rust / Python / JSON within 0.5% of `tokei`.
   - Every subcommand exits 0 with non-empty stdout under default filters.
-  - Cohort surviving sum at latest bucket == current total code lines
-    (within ±0.5%).
-  - Coupling top-1 pair matches `git log --name-only` co-occurrence
-    hand-check.
-- Perf ceiling: full `index` < 30 s, any query < 500 ms.
+  - Coupling top-1 pair has > 1 co-commit.
+  - Surviving lines within 50% of sampled code lines (loose: one counts
+    every line, the other code only).
+- Perf ceiling: full `index` < 180 s, any query < 5 s (loose: shared
+  runners; the §Perf targets are measured by tier 3).
 
-### Tier 3 — mid & mid-large bench (manual / nightly, `cargo bench --features bench-large`)
+### Tier 3 — mid & mid-large bench (local, `just bench`)
 
-Not run in default CI. Runs on a dev box or a nightly GitHub Action with
-a beefier runner. Both correctness (looser bounds) and perf (hard
-ceilings).
+`cargo test --release --features bench-large --test tier3_bench`. Not in
+CI. Perf ceilings per class (index 180 s / 600 s / 1800 s, queries
+5 s / 10 s / 30 s), RSS < 2 GB. The table below is the target, not the
+gate.
 
 | Class     | Fixture repo          | Commits | Perf ceiling (index) | Perf ceiling (query) |
 | --------- | --------------------- | ------- | -------------------- | -------------------- |
@@ -550,9 +586,6 @@ ceilings).
     Correctness is secondary; perf is the gate.
 - Fixture repos pinned by commit SHA in `benches/fixtures.toml` so
   results are reproducible across runs.
-- Comparison rows for the same query on the same repo run against
-  `hercules` (if installed) and `git-of-theseus` (if installed) — logged,
-  not asserted. We ship a table in the README, not a test failure.
 - Memory ceiling: RSS < 2 GB on mid-large during index.
 - Cache size ceiling: matches §Perf targets.
 
@@ -573,7 +606,8 @@ ceilings).
 - No Windows.
 - No branch other than HEAD walked for sampling (though the full DAG is
   stored — cross-branch queries via `sql` still work).
-- No content-based language detection (extension only).
+- No content-based language detection: extension, plus an exact
+  filename map for `Makefile`, `Dockerfile`, `CMakeLists.txt`.
 
 ## Config
 
@@ -596,7 +630,7 @@ Justify every crate on the fence.
 | --------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `gix`                       | pure-Rust git, no subprocess, gives hunks + rename via `blob_diff`  | shell out to `git` — slower per-commit                                    |
 | `duckdb` (unbundled)        | columnar OLAP + parquet native + window fns; new metric = new query | `sqlite` (row-store, slow on aggregations); polars (no persistence story) |
-| `tree-sitter` + 20 grammars | required for function-level + exact comment split                   | regex (approximate, no function-level)                                    |
+| `tree-sitter` + 23 grammars | required for function-level + exact comment split                   | regex (approximate, no function-level)                                    |
 | `rayon`                     | per-commit parallelism                                              | manual threading                                                          |
 | `clap`                      | CLI                                                                 | —                                                                         |
 | `plotters`                  | —                                                                   | **rejected** — no plotting in v1                                          |
@@ -619,8 +653,8 @@ dropped — first build no longer takes 5-15 minutes for either path.
 
 ## Roadmap post-v1
 
-- v1.1: extra grammars behind Cargo features (Java, Ruby, Bash, HTML,
-  CSS, JSON, YAML, TOML, Markdown, Scala, Haskell, Zig, ...).
+- More grammars only where functions matter (Zig, Dart, Elixir,
+  Objective-C); they already get line counts without one.
 - v1.1: `git-arch serve` — unix socket daemon; editor extensions.
 - v1.2: full incremental blame (RB-tree, hercules-style) IF a real user
   asks for line-level ownership. Kept out of v1 because cohort covers
@@ -636,7 +670,7 @@ dropped — first build no longer takes 5-15 minutes for either path.
   subcommands + `--by` flag.
 - Ownership lens as sha × path blame subprocess.
 - Delta view as a first-class mode (compute in SQL).
-- Language detection heuristics beyond ext map.
+- Language detection heuristics beyond ext + exact filename map.
 - Sentiment / DTW / any ML.
 - Babelfish / UAST.
 - `--exclude` flag / `default_exclude` config — use `sql WHERE`.

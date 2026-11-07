@@ -9,10 +9,11 @@ a green gate before the next starts.
 
 ## Decisions
 
-- **Grammars.** V1 built-in set = 20 (SPEC §Language stack). Phase 0
+- **Grammars.** Built-in set = 23 (SPEC §Language stack). Phase 0
   cut back to Core 7 to shake out the pipeline; commit `de8a04c`
-  re-expanded to 20 (Core 9 full + Extended 11 best-effort) once the
-  +1 MB/grammar cost proved cheap.
+  re-expanded to 20 once the +1 MB/grammar cost proved cheap; Kotlin,
+  C#, Swift added later. 30+ more languages get line counts with no
+  grammar (`Parse::Plain`).
 - **Blame.** Deferred to v1.2. Delete `src/index/blame.rs`, the `blame`
   table, and every query that touches it. No preview gate.
 - **Cache migration.** Auto-nuke stale caches on first v1 run; log one
@@ -99,7 +100,8 @@ two smaller ones. All fixed on top of the existing Phase 1 code:
       file OK) → `commits.ignored_blame`.
 - [x] Per non-merge commit: `gix::blob_diff` with rename detection →
       four-line-range `hunks` + numstat rollup in `file_churn`.
-      (Serial — parallel via rayon deferred to v1.x perf polish.)
+      Parallel via rayon (§Indexer perf). Lines diff with their
+      terminators, so newline-at-EOF and CRLF changes match git.
 - [x] Sampled commits only: tree-sitter LOC + function extraction →
       `file_stats`, `funcs`. Symlinks / submodules / binaries skipped.
 - [x] `bucket::bucket_key` gains a `tag` variant (boundary = each
@@ -115,8 +117,8 @@ two smaller ones. All fixed on top of the existing Phase 1 code:
       `prev_path`, cycle-guarded resolver).
 - [x] Per-file fold: `Vec<(sha, bucket)>` per line, splice via the
       standard `old_file → new_file` merge (copy pre-hunk region, skip
-      `old_len`, emit `new_len` of current sha). Serial — rayon
-      parallelism across files deferred to v1.x perf polish.
+      `old_len`, emit `new_len` of current sha). Parallel across files
+      via rayon (§Indexer perf).
 - [x] Materialize `line_births(path, line_no, birth_sha, birth_bucket)`
       as a table; rebuilt on every `index` run.
 - [ ] Incremental cohort fold — rerun only for paths whose hunk set
@@ -177,8 +179,8 @@ two smaller ones. All fixed on top of the existing Phase 1 code:
 
 ## Phase 5 — tests (SPEC §Test strategy, four tiers)
 
-CI runs Tier 0 + 1 on every push; Tier 2 opt-in via feature flag;
-Tier 3 nightly / manual.
+CI runs Tier 0 + 1 + 1.x (plus fmt + clippy) on every push. Tier 2 and
+3 run locally: `just e2e`, `just bench`. `just --list` for the rest.
 
 ### Tier 0 — unit ✅
 
@@ -203,7 +205,7 @@ Tier 3 nightly / manual.
 - [x] `query::Filters` — date parsing (from midnight, to exclusive next
       day), WHERE-clause composition, sql-escape, empty defaults.
 
-### Tier 1 — golden repo integration ✅ (invariant-based, not byte-exact)
+### Tier 1 — golden repo integration ✅ (exact rows, as multisets)
 
 - [x] `tests/golden.rs` — `tempfile` + system `git`. 3 authors, 7 langs,
       30+ commits. Includes rename, merge, revert, `Co-authored-by:`
@@ -215,13 +217,13 @@ Tier 3 nightly / manual.
 - [x] Every subcommand exits 0 with non-empty stdout (`burndown ×2`,
       `classify`, `churn ×2`, `age`, `coupling`, `hotspot`, `cohort`,
       `survival`).
-- [x] Round-trip: `index && export parquet <dir>` writes all 12 tables
-      (including `line_births`).
-- [x] Byte-exact goldens via parquet + DuckDB `EXCEPT` set-diff
-      (`tests/goldens/*.parquet`, 12 tables, ~26 KB). Regen with
-      `REGEN_GOLDENS=1 cargo test --test golden tier1_golden_integration`.
-      Skipped xtask crate — env-var branch inside the same test does the
-      job in ~10 lines. Set-diff dodges parquet footer + row-order drift;
+- [x] Round-trip: `index && export parquet <dir>` writes all 13 tables
+      (including `line_births`, `chain_births`).
+- [x] Exact goldens via parquet + DuckDB `EXCEPT ALL` both ways
+      (`tests/goldens/*.parquet`, 13 tables). Multiset, not set: a
+      duplicated row fails. Regen with `just regen-goldens`. Skipped
+      xtask crate — env-var branch inside the same test does the job in
+      ~10 lines. The diff dodges parquet footer + row-order drift;
       fixture already pins every author/committer date so SHAs + author
       ids are stable.
 
@@ -334,17 +336,31 @@ Tracked so the `ponytail:` markers in source don't rot into "later
 means never". Each entry names the file, the ceiling, and what earns
 the upgrade.
 
-- **`src/cache/mod.rs:55` — DuckDB memory_limit hard-coded at 12 GB.**
-  Ceiling: hosts with < 12 GB free RAM will still OOM on a 100k-commit
-  fold. Upgrade path: read `memory_limit` from `config.toml` (add to
-  the shrunk-in-Phase-1 config), fallback 12 GB. Trigger: a real user
-  reports the ceiling, or Tier 3 harness on godot exceeds it.
-- **`skills/git-arch-analyze/run.sh:8` — skill has no flags beyond
-  repo path.** Ceiling: caller can't override `/tmp` out-dir, skip
-  the index step on a warm cache, or narrow to a subset of
-  subcommands. Upgrade path: add flags only when a real ask lands
-  (candidates: `--out-dir`, `--skip-index`, `--only`). Speculative
-  scaffolding stays out.
+- **`src/cache/mod.rs` `tune` — DuckDB memory_limit hard-coded at
+  12 GB.** Ceiling: hosts with < 12 GB free RAM will still OOM on a
+  100k-commit fold. Upgrade path: read `memory_limit` from `config.toml`,
+  fallback 12 GB. Trigger: a real user reports the ceiling, or Tier 3
+  on godot exceeds it.
+- **`src/cache/mod.rs` `is_lock_error` — matches DuckDB's message
+  text.** Ceiling: a DuckDB wording change turns a lock into a
+  "corrupt cache" rebuild. Upgrade: typed check if duckdb-rs exposes
+  one. `scenario_locked_cache_is_not_wiped` catches the regression.
+- **`src/index/treesitter.rs` `plain_comment_ranges` — double quotes
+  only.** Ceiling: `/*` inside a single-quoted string (SQL, Dart) opens
+  a block to the next `*/`. Upgrade: per-language quote chars when
+  tokei drift shows on a fixture.
+- **`src/index/treesitter.rs` Vue / Svelte — one comment syntax per
+  file.** Ceiling: `<script>` / `<style>` split approximate vs tokei.
+  Upgrade: embedded-language split, only if someone reads Vue numbers
+  closely.
+- **`tests/tier3_bench.rs` RSS — `RUSAGE_CHILDREN` is monotonic.**
+  Ceiling: fixture N reports max RSS over fixtures 1..=N. Fine while
+  mid-large runs last.
+- **`skills/git-arch-analyze/run.sh` — no flags beyond repo path.**
+  Ceiling: caller can't override `/tmp` out-dir, skip the index step on
+  a warm cache, or narrow to a subset of subcommands. Upgrade path: add
+  flags only when a real ask lands (candidates: `--out-dir`,
+  `--skip-index`, `--only`).
 
 **Closed:**
 
@@ -363,16 +379,29 @@ invariant exactly.
 
 - [x] `tests/common/dsl.rs` — `Action` enum (`Commit`, `Rename`,
       `Delete`) + `build(dir, &actions)`. Derives email from author
-      name; deterministic dates → stable SHAs. Extend the enum
-      (Branch/Merge/Tag) when a new scenario needs it — YAGNI today.
+      name; deterministic dates → stable SHAs. Branch / merge / tag
+      scenarios use the `git_at` / `git_as` / `commit_all` helpers in
+      `scenarios.rs` instead of growing the enum.
 - [x] `tests/scenarios.rs` — `scenario_rename_chain` (a→b→c, asserts
       final canonical + rename link count), `scenario_cohort_survival`
       (controlled birth/death, asserts exact surviving cohort + line
       count). Add new `scenario_*` fns here as regressions land.
-- [ ] `scenario_trailer_edge` — unicode names, quoted commas,
-      `Signed-off-by:` chains. Add when a trailer bug surfaces.
-- [ ] `scenario_classify_edge` — malformed subjects, git-generated
-      `Revert "…"`. Add when a classify bug surfaces.
+- [x] Trailer edges (unicode names, quoted commas, `Signed-off-by:`
+      chains, mailmap) — `scenario_authors_mailmap_and_trailers`.
+- [x] `scenario_classify_edge` — scoped `!`, footer `BREAKING CHANGE`,
+      git `Revert "…"`, `revert:`, `fixup!`, capitalized type, no space.
+- [x] Query outputs: survival rows + fit (in days), coupling cap,
+      hotspot attribution, churn depth, burndown by kind.
+- [x] Bucket keys per size (ISO week wrap), `--bucket` mismatch warning,
+      inclusive UTC date filters.
+- [x] Odd files (CRLF, no final newline, empty, unicode paths, case-only
+      rename, gitlink, file↔dir, rewrite past rename threshold) and
+      history (octopus, criss-cross, unrelated root, rewritten history).
+- [x] Bare / detached / shallow repos; new languages end to end.
+- Bugs these found and fixed: query `--bucket` silently ignored on a
+  warm cache; newline-at-EOF and CRLF edits invisible to the diff;
+  survival fit in bucket-key units instead of days, with a misleading
+  "insufficient data" reason.
 - [ ] Property tests (`proptest`) on the fold: random commit sequences,
       assert (Σ hunk_new − Σ hunk_del) = final_LOC per file; cohort
       `born = alive + dead` per bucket. Post-v1 (already in "Possible
@@ -381,7 +410,7 @@ invariant exactly.
       PR diffs on intentional golden changes. Trigger: first golden
       regen where the parquet-file diff obscures a meaningful change.
 
-### Tier 3 — mid & mid-large bench (`--features bench-large`, nightly)
+### Tier 3 — mid & mid-large bench (`--features bench-large`, `just bench`)
 
 - [x] Cargo feature `bench-large` gates the module.
 - [x] `benches/fixtures.toml` — SHA-pinned `ratatui-org/ratatui`
@@ -393,23 +422,18 @@ invariant exactly.
       `index` + every subcommand, asserts per-class ceilings (small
       180s / mid 600s / mid-large 1800s index; queries 5s/10s/30s).
       Skips per-fixture when no network + no cache. Local validated:
-      ratatui 36s / 540ms / 516 MB; uv 107s / 211ms / 694 MB.
+      ratatui 36s / 540ms / 516 MB RSS; uv 107s / 211ms / 694 MB RSS.
       Placed in `tests/` (not `benches/`) to reuse the Tier 2 pattern
       — no criterion, no nightly.
 - [x] RSS ceiling < 2 GB on mid-large — `libc::getrusage(RUSAGE_CHILDREN)`
       via ru_maxrss. Ponytail: monotonic across fixtures, so relies on
       mid-large running last (naturally the case for size-ordered
       fixtures.toml). Upgrade path noted in tier3_bench.rs.
-- [ ] Optional side-by-side rows: `hercules` / `git-of-theseus` if on
-      PATH. Deferred with ponytail — their CLIs vary by version and we
-      have no reliable install to test against. Add when either tool is
-      installed in a real CI run.
-- [x] `.github/workflows/bench.yml` — nightly cron (04:17 UTC) +
-      `workflow_dispatch` with `skip_large` input, `ubuntu-latest`
-      runner, fixture cache keyed on `hashFiles('benches/fixtures.toml')`,
-      log artifact upload (90d retention). Skipped: dedicated JSON
-      emit + result-branch push — bench log artifact covers the need
-      until someone wants machine-readable trend data.
+- ~~Optional side-by-side rows: `hercules` / `git-of-theseus`.~~ Killed:
+  CLIs vary by version and count differently (theseus blames per
+  sample); git, blame and tokei are the oracles.
+- ~~`.github/workflows/bench.yml` nightly.~~ Removed: GitHub CI kept to
+  one fmt + clippy + test job. Run `just bench` locally.
 
 ## Phase 6 — release
 
@@ -440,8 +464,9 @@ reasoning.
   40 k commits) showed first-segment grouping hides the story: `src`,
   `runtime`, `test` are each too broad. Reversed as `churn --depth N`
   (default 1); flag only, no config default.
-- Bundled DuckDB compile path — `cargo dist` prebuilt binaries instead.
-- 19-grammar-then-shrink cycle — v1 now ships 20 grammars built in
+- Bundled DuckDB compile path for users — `cargo dist` prebuilt
+  binaries instead (CI still builds with `bundled-duckdb`).
+- 19-grammar-then-shrink cycle — now 23 grammars built in
   (SPEC §Language stack); Phase 0's 7-grammar interim is history.
 - `unmerged_candidates` heuristic + AliasMerge modal — static
   `aliases.toml` covers it.
@@ -455,7 +480,6 @@ Kept from prior TASKS for future reference. Not planned; capture, revisit.
 
 ### Perf
 
-- Rayon-parallelize churn walk (per-thread `gix::open()` on same `.git/`).
 - Skip `find_object` when the blob is already in the tree-sitter cache.
 - Incremental Parquet writes (`INSERT INTO ext_table SELECT * FROM
   new_rows` + `COPY TO`).
@@ -485,14 +509,19 @@ Kept from prior TASKS for future reference. Not planned; capture, revisit.
 - `git-arch serve` unix-socket daemon; editor extensions.
 - Library split: `git-archaeologist-core` crate + CLI binary.
 
-### Grammars (v1.1 re-add + new)
+### Grammars
 
-- Re-add (deleted in Phase 0): Java, Ruby, Bash, HTML, CSS, JSON, YAML,
-  TOML, Markdown, Scala, Haskell, Zig.
-- New candidates: PHP, Kotlin, Swift, Elm, Nim, Elixir, Erlang, Clojure,
-  R, Julia, Solidity, GraphQL, Dart, OCaml, Lua.
+- Grammar candidates where functions matter: Zig, Dart, Elixir, Erlang,
+  Objective-C, Clojure, Elm, Nim, Solidity (all but the last four
+  already get line counts via `Parse::Plain`).
+- Plain-text docs (`.txt`) stay `other`: too generic to label.
+- Syntax test detection for Kotlin / C# / Swift (`@Test`, `[Fact]`,
+  `XCTestCase`); path rules only today.
+- `.git-blame-ignore-revs` → `stats` ownership: the flag is stored
+  (`commits.ignored_blame`), no report reads it.
 
 ### Meta
 
-- Property tests (`proptest`) on `apply_view`: Σ Δ == final − initial.
+- Property tests (`proptest`) on `cohort::fold` over in-memory hunks:
+  lines per file == final line count, `born = alive + dead`.
 - Fuzz the tree-sitter classifier with `cargo-fuzz`.
