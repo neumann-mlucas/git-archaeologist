@@ -76,6 +76,24 @@ impl Env {
             .unwrap_or_else(|| panic!("could not parse scalar from:\n{out}"))
     }
 
+    /// Data rows of a TSV report, header dropped.
+    fn rows(&self, args: &[&str]) -> Vec<String> {
+        let mut a = args.to_vec();
+        a.extend(["--format", "tsv"]);
+        self.arch_stdout(&a)
+            .lines()
+            .skip(1)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// stderr of a run that must succeed.
+    fn stderr_of(&self, args: &[&str]) -> String {
+        let out = self.arch(args);
+        assert!(out.status.success(), "arch {args:?} failed");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
     fn births(&self) -> String {
         self.arch_stdout(&["sql", truth::BIRTHS_SQL, "--format", "tsv"])
     }
@@ -242,13 +260,18 @@ fn scenario_cohort_survival() {
 
 /// Raw git in the scenario repo with a fixed identity and date.
 fn git_at(env: &Env, date: &str, args: &[&str]) -> String {
+    git_as(env, ("Bob", "bob@example.com"), date, args)
+}
+
+/// Raw git as `(name, email)` at `date`.
+fn git_as(env: &Env, who: (&str, &str), date: &str, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(&env.repo)
-        .env("GIT_AUTHOR_NAME", "Bob")
-        .env("GIT_AUTHOR_EMAIL", "bob@example.com")
-        .env("GIT_COMMITTER_NAME", "Bob")
-        .env("GIT_COMMITTER_EMAIL", "bob@example.com")
+        .env("GIT_AUTHOR_NAME", who.0)
+        .env("GIT_AUTHOR_EMAIL", who.1)
+        .env("GIT_COMMITTER_NAME", who.0)
+        .env("GIT_COMMITTER_EMAIL", who.1)
         .env("GIT_AUTHOR_DATE", date)
         .env("GIT_COMMITTER_DATE", date)
         .output()
@@ -1086,4 +1109,831 @@ fn scenario_branch_lines_are_born_at_merge() {
     for r in rows {
         assert_eq!(r[1], r[2], "all lines alive, so born == alive:\n{out}");
     }
+}
+
+// ---- query outputs on controlled histories ----
+
+const T0: i64 = 1_735_689_600; // 2025-01-01T00:00:00Z
+const DAY: i64 = 86_400;
+
+/// Unix-seconds date for `git_at` and friends.
+fn at(ts: i64) -> String {
+    format!("{ts} +0000")
+}
+
+/// Stage everything and commit at `ts`.
+fn commit_all(env: &Env, ts: i64, msg: &str) {
+    git_at(env, &at(ts), &["add", "-A"]);
+    git_at(env, &at(ts), &["commit", "-q", "--allow-empty", "-m", msg]);
+}
+
+fn write(env: &Env, files: &[(&str, &str)]) {
+    for (p, body) in files {
+        let full = env.repo.join(p);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, body).unwrap();
+    }
+}
+
+/// Fresh repo on `main`, no commits.
+fn init(env: &Env) {
+    git_at(env, &at(T0), &["init", "-q", "-b", "main"]);
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// Kaplan-Meier rows: born / alive / dead per birth cohort, and the fit
+/// refusing to run on too few deaths.
+#[test]
+fn scenario_survival_counts_deaths_per_cohort() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("f.txt", "a\nb\nc\nd\n")]);
+    commit_all(&env, T0, "feat: f");
+    write(&env, &[("f.txt", "a\nc\nnew\n")]);
+    commit_all(&env, T0 + DAY, "fix: f");
+    write(&env, &[("g.txt", "g\n")]);
+    commit_all(&env, T0 + 2 * DAY, "feat: g");
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+
+    assert_eq!(
+        env.rows(&["survival"]),
+        [
+            format!("{T0}\t4\t2\t2\t0.5"),
+            format!("{}\t1\t1\t0\t1", T0 + DAY),
+            format!("{}\t1\t1\t0\t1", T0 + 2 * DAY),
+        ]
+    );
+    assert_eq!(
+        env.rows(&["survival", "--fit", "exp"]),
+        ["half_life\t\tinsufficient data: 2 deletion events (need >= 100)"]
+    );
+}
+
+/// With enough deaths the fit returns a positive half-life.
+#[test]
+fn scenario_survival_fit_returns_half_life() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    // Two partly-dead cohorts: the older one keeps less.
+    let tail = |n: usize, skip: usize| -> String {
+        numbered(n)
+            .lines()
+            .skip(skip)
+            .map(|l| format!("{l}\n"))
+            .collect()
+    };
+    write(&env, &[("f.txt", &numbered(300))]);
+    commit_all(&env, T0, "feat: f");
+    write(&env, &[("g.txt", &numbered(200))]);
+    commit_all(&env, T0 + 10 * DAY, "feat: g");
+    write(
+        &env,
+        &[("f.txt", &tail(300, 150)), ("g.txt", &tail(200, 50))],
+    );
+    commit_all(&env, T0 + 20 * DAY, "fix: trim");
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+
+    let rows = env.rows(&["survival", "--fit", "exp"]);
+    let cols: Vec<&str> = rows[0].split('\t').collect();
+    assert_eq!(cols[0], "half_life", "{rows:?}");
+    let days: f64 = cols[1]
+        .parse()
+        .unwrap_or_else(|_| panic!("no value: {rows:?}"));
+    // s = 0.5 at 20 days, 0.75 at 10: ln 2 / (ln 1.5 / 10) = 17.1 days.
+    assert!((days - 17.1).abs() < 0.1, "half-life not in days: {rows:?}");
+}
+
+/// Co-commit counts, and `--max-files-per-commit` dropping wide commits.
+#[test]
+fn scenario_coupling_counts_and_caps_wide_commits() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("a.txt", "1\n"), ("b.txt", "1\n")]);
+    commit_all(&env, T0, "feat: ab");
+    write(
+        &env,
+        &[("a.txt", "2\n"), ("b.txt", "2\n"), ("c.txt", "1\n")],
+    );
+    commit_all(&env, T0 + DAY, "feat: abc");
+    let wide: Vec<(String, String)> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|f| (format!("{f}.txt"), "3\n".to_string()))
+        .collect();
+    let wide: Vec<(&str, &str)> = wide.iter().map(|(p, b)| (p.as_str(), b.as_str())).collect();
+    write(&env, &wide);
+    commit_all(&env, T0 + 2 * DAY, "chore: wide");
+    env.arch_stdout(&["index"]);
+
+    let top = env.rows(&["coupling", "--top", "1"]);
+    assert_eq!(top, ["a.txt\tb.txt\t3"]);
+    let capped = env.rows(&["coupling", "--top", "10", "--max-files-per-commit", "4"]);
+    assert_eq!(
+        sorted(capped),
+        ["a.txt\tb.txt\t2", "a.txt\tc.txt\t1", "b.txt\tc.txt\t1"]
+    );
+}
+
+/// A hunk is credited to the function whose span holds its first line.
+#[test]
+fn scenario_hotspot_credits_the_enclosing_fn() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(
+        &env,
+        &[("lib.rs", "fn a() {\n    1;\n}\n\nfn b() {\n    2;\n}\n")],
+    );
+    commit_all(&env, T0, "feat: lib");
+    write(
+        &env,
+        &[("lib.rs", "fn a() {\n    1;\n}\n\nfn b() {\n    3;\n}\n")],
+    );
+    commit_all(&env, T0 + DAY, "fix: b");
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+
+    let rows = env.rows(&["hotspot", "--lang", "rust"]);
+    let t1 = T0 + DAY;
+    assert!(
+        rows.contains(&format!("{t1}\tlib.rs\tb\tfn\tRust\t1\t1\t2")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.starts_with(&format!("{t1}\tlib.rs\ta\t"))),
+        "edit inside b credited to a: {rows:?}"
+    );
+}
+
+/// `churn --depth N` groups by the first N segments; shorter paths keep
+/// their full path.
+#[test]
+fn scenario_churn_depth_groups_paths() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(
+        &env,
+        &[
+            ("src/x/a.rs", "1\n"),
+            ("src/y/b.rs", "1\n2\n"),
+            ("src/c.rs", "1\n"),
+            ("top.txt", "1\n"),
+        ],
+    );
+    commit_all(&env, T0, "feat: init");
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+
+    let module = |depth: &str| sorted(env.rows(&["churn", "--by", "module", "--depth", depth]));
+    assert_eq!(
+        module("2"),
+        [
+            format!("{T0}\tsrc/c.rs\t1\t0"),
+            format!("{T0}\tsrc/x\t1\t0"),
+            format!("{T0}\tsrc/y\t2\t0"),
+            format!("{T0}\ttop.txt\t1\t0"),
+        ]
+    );
+    assert_eq!(
+        module("1"),
+        [format!("{T0}\tsrc\t4\t0"), format!("{T0}\ttop.txt\t1\t0")]
+    );
+}
+
+/// `burndown --by kind` splits test code (test path or test region) from
+/// the rest.
+#[test]
+fn scenario_burndown_by_kind_splits_tests() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(
+        &env,
+        &[
+            (
+                "src/lib.rs",
+                "fn f() {}\n#[cfg(test)]\nmod t {\n    #[test]\n    fn x() {}\n}\n",
+            ),
+            ("tests/it.rs", "fn y() {}\n"),
+            ("config.yaml", "a: 1\n"),
+        ],
+    );
+    commit_all(&env, T0, "feat: init");
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+    assert_eq!(
+        sorted(env.rows(&["burndown", "--by", "kind"])),
+        [format!("{T0}\tcode\t2"), format!("{T0}\ttest\t6")]
+    );
+}
+
+/// Conventional Commit parsing on the subjects real repos produce.
+#[test]
+fn scenario_classify_edge() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    let msgs = [
+        "feat(scope)!: x",
+        "fix: y\n\nBREAKING CHANGE: z",
+        "Revert \"feat(scope)!: x\"\n\nThis reverts commit abc.",
+        "revert: y",
+        "fixup! fix: y",
+        "Feat: Caps",
+        "docs: d",
+        "random words",
+        "feat:tight",
+    ];
+    for (i, m) in msgs.iter().enumerate() {
+        write(&env, &[("f.txt", &numbered(i + 1))]);
+        commit_all(&env, T0 + i as i64 * 60, m);
+    }
+    env.arch_stdout(&["index", "--bucket", "month"]);
+    let got = env.rows(&[
+        "sql",
+        "SELECT split_part(message, chr(10), 1), coalesce(msg_type, '-'), \
+                is_breaking, is_revert \
+         FROM commits ORDER BY authored_at",
+    ]);
+    assert_eq!(
+        got,
+        [
+            "feat(scope)!: x\tfeat\ttrue\tfalse",
+            "fix: y\tfix\ttrue\tfalse",
+            "Revert \"feat(scope)!: x\"\t-\tfalse\ttrue",
+            "revert: y\trevert\tfalse\ttrue",
+            "fixup! fix: y\t-\tfalse\tfalse",
+            "Feat: Caps\tfeat\tfalse\tfalse",
+            "docs: d\tdocs\tfalse\tfalse",
+            "random words\t-\tfalse\tfalse",
+            "feat:tight\tfeat\tfalse\tfalse",
+        ]
+    );
+    // commits fixes feats reverts breaking untyped
+    assert_eq!(env.rows(&["classify"]), ["202501\t9\t1\t3\t2\t2\t3"]);
+}
+
+// ---- bucketing and dates ----
+
+/// Every bucket size keys the same commits as documented, and one commit
+/// per bucket is sampled. 2024-12-30 sits in ISO week 2025-W01.
+#[test]
+fn scenario_bucket_keys_per_size() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    let (dec30, jan2, feb10) = (T0 - 2 * DAY + 43_200, T0 + DAY, T0 + 40 * DAY);
+    for (i, ts) in [dec30, jan2, feb10].into_iter().enumerate() {
+        write(&env, &[("f.txt", &numbered(i + 1))]);
+        commit_all(&env, ts, "feat: f");
+        if i == 1 {
+            git_at(&env, &at(ts), &["tag", "v1"]);
+        }
+    }
+    let keys = |bucket: &str| {
+        env.arch_stdout(&["reindex", "--bucket", bucket]);
+        let k = env.rows(&["sql", "SELECT DISTINCT bucket_key FROM commits ORDER BY 1"]);
+        let sampled = env.sql_i64("SELECT COUNT(*) FROM commits WHERE is_sampled");
+        assert_eq!(sampled as usize, k.len(), "{bucket}: one sample per bucket");
+        k
+    };
+    assert_eq!(keys("day"), ["20241230", "20250102", "20250210"]);
+    assert_eq!(keys("week"), ["202501", "202507"]);
+    assert_eq!(keys("month"), ["202412", "202501", "202502"]);
+    assert_eq!(
+        keys("commit"),
+        [dec30.to_string(), jan2.to_string(), feb10.to_string()]
+    );
+    assert_eq!(keys("tag").len(), 2, "one bucket up to v1, one after");
+
+    let warn = env.stderr_of(&["classify", "--bucket", "month"]);
+    assert!(
+        warn.contains("bucketed by tag, not month"),
+        "no bucket mismatch warning: {warn}"
+    );
+    assert!(!env
+        .stderr_of(&["classify", "--bucket", "tag"])
+        .contains("bucketed by"));
+}
+
+/// `--from` / `--to` are inclusive UTC days; a +05:00 commit on Feb 1
+/// local time is Jan 31 in UTC.
+#[test]
+fn scenario_date_filters_are_inclusive_utc_days() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    let dates = [
+        "2025-01-01T00:00:00Z",
+        "2025-01-31T23:59:59Z",
+        "2025-02-01T01:00:00+05:00",
+        "2025-02-01T00:00:00Z",
+    ];
+    for (i, d) in dates.iter().enumerate() {
+        write(&env, &[("f.txt", &numbered(i + 1))]);
+        git_at(&env, d, &["add", "-A"]);
+        git_at(&env, d, &["commit", "-q", "-m", "feat: f"]);
+    }
+    env.arch_stdout(&["index", "--bucket", "month"]);
+    let commits = |args: &[&str]| -> i64 {
+        let mut a = vec!["classify"];
+        a.extend(args);
+        env.rows(&a)
+            .iter()
+            .map(|r| r.split('\t').nth(1).unwrap().parse::<i64>().unwrap())
+            .sum()
+    };
+    assert_eq!(commits(&["--from", "2025-01-01", "--to", "2025-01-31"]), 3);
+    assert_eq!(commits(&["--from", "2025-02-01"]), 1);
+    assert_eq!(commits(&["--to", "2025-01-01"]), 1);
+}
+
+// ---- authors ----
+
+/// `.mailmap` folds two emails into one author; trailers with unicode,
+/// quoted commas and a sign-off chain land in `commit_trailers` under
+/// canonical identities.
+#[test]
+fn scenario_authors_mailmap_and_trailers() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(
+        &env,
+        &[(".mailmap", "Alice <alice@new.org> <alice@old.org>\n")],
+    );
+    git_as(&env, ("alice", "alice@old.org"), &at(T0), &["add", "-A"]);
+    git_as(
+        &env,
+        ("alice", "alice@old.org"),
+        &at(T0),
+        &["commit", "-q", "-m", "feat: map"],
+    );
+    write(&env, &[("f.txt", "1\n")]);
+    let msg = "feat: pair\n\n\
+               Co-authored-by: \"Doe, John\" <j@x.org>\n\
+               Co-authored-by: Åsa Ölund <asa@ø.no>\n\
+               Signed-off-by: Bob <bob@x.org>\n\
+               Signed-off-by: alice <alice@old.org>\n";
+    let who = ("Alice", "alice@new.org");
+    git_as(&env, who, &at(T0 + DAY), &["add", "-A"]);
+    git_as(&env, who, &at(T0 + DAY), &["commit", "-q", "-m", msg]);
+    env.arch_stdout(&["index"]);
+
+    assert_eq!(
+        env.rows(&[
+            "sql",
+            "SELECT canonical_name, canonical_email FROM authors ORDER BY 1"
+        ]),
+        [
+            "Alice\talice@new.org",
+            "Bob\tbob@x.org",
+            "Doe, John\tj@x.org",
+            "Åsa Ölund\tasa@ø.no",
+        ]
+    );
+    assert_eq!(
+        env.rows(&[
+            "sql",
+            "SELECT a.canonical_name, t.role FROM commit_trailers t \
+             JOIN authors a ON a.id = t.author_id ORDER BY 1, 2",
+        ]),
+        [
+            "Alice\tsignoff",
+            "Bob\tsignoff",
+            "Doe, John\tcoauthor",
+            "Åsa Ölund\tcoauthor",
+        ]
+    );
+    assert_eq!(
+        env.rows(&["churn", "--by", "author"])
+            .iter()
+            .map(|r| r.split('\t').nth(1).unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["Alice".to_string()].into()
+    );
+}
+
+/// `.git-blame-ignore-revs` (comments, blanks, uppercase sha) flags exactly
+/// the listed commit.
+#[test]
+fn scenario_blame_ignore_revs_flags_listed_commit() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("f.txt", "1\n")]);
+    commit_all(&env, T0, "feat: f");
+    write(&env, &[("f.txt", "  1\n")]);
+    commit_all(&env, T0 + DAY, "style: reformat");
+    let fmt = git_at(&env, &at(T0), &["rev-parse", "HEAD"]);
+    write(
+        &env,
+        &[(
+            ".git-blame-ignore-revs",
+            &format!("# formatting\n\n{}\n", fmt.to_uppercase()),
+        )],
+    );
+    commit_all(&env, T0 + 2 * DAY, "chore: ignore fmt");
+    env.arch_stdout(&["index"]);
+    assert_eq!(
+        env.rows(&["sql", "SELECT sha FROM commits WHERE ignored_blame"]),
+        [fmt]
+    );
+}
+
+// ---- unusual files ----
+
+/// CRLF, no trailing newline, empty file, unicode and spaces in paths,
+/// a case-only rename and a gitlink all fold the way git sees them.
+#[test]
+fn scenario_odd_files_match_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    git_at(&env, &at(T0), &["config", "core.autocrlf", "false"]);
+    write(
+        &env,
+        &[
+            ("crlf.txt", "a\r\nb\r\n\r\nc\r\n"),
+            ("nonl.txt", "a\nb"),
+            ("empty.txt", ""),
+            ("dir with space/naïve ü.txt", "x\ny\n"),
+            ("Case.txt", "1\n2\n"),
+        ],
+    );
+    commit_all(&env, T0, "feat: odd");
+    git_at(&env, &at(T0 + DAY), &["mv", "Case.txt", "case.txt"]);
+    write(&env, &[("nonl.txt", "a\nb\nc")]);
+    let blob = git_at(&env, &at(T0), &["rev-parse", "HEAD"]);
+    git_at(
+        &env,
+        &at(T0 + DAY),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{blob},sub"),
+        ],
+    );
+    commit_all(&env, T0 + DAY, "chore: rename, gitlink");
+    env.arch_stdout(&["index"]);
+
+    env.assert_matches_git();
+    truth::assert_line_counts(&env.repo, &env.births());
+    assert_eq!(
+        env.sql_i64("SELECT COUNT(*) FROM line_births WHERE path = 'sub'"),
+        0,
+        "gitlink has no lines"
+    );
+    assert_eq!(
+        env.rows(&[
+            "sql",
+            "SELECT code, blanks FROM file_stats fs JOIN commits c USING (sha) \
+             WHERE path = 'crlf.txt' AND c.authored_at = (SELECT MAX(authored_at) FROM commits)",
+        ]),
+        Vec::<String>::new(),
+        "no grammar for .txt, so no file_stats row"
+    );
+}
+
+/// A path that turns from a file into a directory (and back) matches git.
+#[test]
+fn scenario_file_becomes_directory_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("a", "1\n2\n")]);
+    commit_all(&env, T0, "feat: file");
+    std::fs::remove_file(env.repo.join("a")).unwrap();
+    write(&env, &[("a/inner.txt", "3\n")]);
+    commit_all(&env, T0 + DAY, "refactor: dir");
+    std::fs::remove_dir_all(env.repo.join("a")).unwrap();
+    write(&env, &[("a", "4\n")]);
+    commit_all(&env, T0 + 2 * DAY, "refactor: file again");
+    env.arch_stdout(&["index"]);
+    env.assert_matches_git();
+}
+
+/// A move plus a rewrite past git's similarity threshold is a delete and
+/// an add, for git and for us.
+#[test]
+fn scenario_rewrite_past_rename_threshold_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("a.txt", &numbered(20))]);
+    commit_all(&env, T0, "feat: a");
+    std::fs::remove_file(env.repo.join("a.txt")).unwrap();
+    let body: String = (1..=20)
+        .map(|i| {
+            if i <= 2 {
+                format!("line {i}\n")
+            } else {
+                format!("new {i}\n")
+            }
+        })
+        .collect();
+    write(&env, &[("b.txt", &body)]);
+    commit_all(&env, T0 + DAY, "refactor: rewrite");
+    env.arch_stdout(&["index"]);
+    env.assert_matches_git();
+}
+
+// ---- unusual history ----
+
+/// Octopus merge: every branch's lines are born at the merge.
+#[test]
+fn scenario_octopus_merge_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("base.txt", "b\n")]);
+    commit_all(&env, T0, "feat: base");
+    for (i, br) in ["x", "y", "z"].iter().enumerate() {
+        git_at(&env, &at(T0), &["checkout", "-q", "-b", br, "main"]);
+        write(&env, &[(&format!("{br}.txt"), &numbered(i + 2))]);
+        commit_all(&env, T0 + (i as i64 + 1) * DAY, &format!("feat: {br}"));
+    }
+    git_at(&env, &at(T0), &["checkout", "-q", "main"]);
+    git_at(
+        &env,
+        &at(T0 + 5 * DAY),
+        &["merge", "-q", "--no-ff", "x", "y", "z", "-m", "octopus"],
+    );
+    let merge = git_at(&env, &at(T0), &["rev-parse", "HEAD"]);
+    env.arch_stdout(&["index"]);
+
+    truth::assert_line_counts(&env.repo, &env.births());
+    assert_eq!(
+        env.sql_i64(&format!(
+            "SELECT COUNT(*) FROM line_births WHERE birth_sha = '{merge}'"
+        )),
+        2 + 3 + 4
+    );
+}
+
+/// Criss-cross merges (each branch merges the other) fold to HEAD's lines.
+#[test]
+fn scenario_criss_cross_merge_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("f.txt", &numbered(10))]);
+    commit_all(&env, T0, "feat: base");
+    git_at(&env, &at(T0), &["branch", "side"]);
+    write(&env, &[("m.txt", "m\n")]);
+    commit_all(&env, T0 + DAY, "feat: main");
+    git_at(&env, &at(T0), &["checkout", "-q", "side"]);
+    write(&env, &[("s.txt", "s\n")]);
+    commit_all(&env, T0 + DAY, "feat: side");
+    git_at(
+        &env,
+        &at(T0 + 2 * DAY),
+        &["merge", "-q", "--no-ff", "main", "-m", "side <- main"],
+    );
+    git_at(&env, &at(T0), &["checkout", "-q", "main"]);
+    git_at(
+        &env,
+        &at(T0 + 2 * DAY),
+        &["merge", "-q", "--no-ff", "side~1", "-m", "main <- side"],
+    );
+    write(&env, &[("m.txt", "m\nm2\n")]);
+    commit_all(&env, T0 + 3 * DAY, "feat: main 2");
+    git_at(
+        &env,
+        &at(T0 + 4 * DAY),
+        &["merge", "-q", "--no-ff", "side", "-m", "main <- side 2"],
+    );
+    env.arch_stdout(&["index"]);
+    truth::assert_line_counts(&env.repo, &env.births());
+}
+
+/// A second root (orphan history) merged in with unrelated histories.
+#[test]
+fn scenario_unrelated_root_merge_matches_git() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(&env, &[("main.txt", "1\n2\n")]);
+    commit_all(&env, T0, "feat: main");
+    git_at(&env, &at(T0), &["checkout", "-q", "--orphan", "vendor"]);
+    git_at(&env, &at(T0), &["rm", "-rq", "--cached", "."]);
+    std::fs::remove_file(env.repo.join("main.txt")).unwrap();
+    write(&env, &[("lib/v.txt", &numbered(3))]);
+    commit_all(&env, T0 + DAY, "feat: vendor root");
+    git_at(&env, &at(T0), &["checkout", "-q", "main"]);
+    git_at(
+        &env,
+        &at(T0 + 2 * DAY),
+        &[
+            "merge",
+            "-q",
+            "--allow-unrelated-histories",
+            "vendor",
+            "-m",
+            "merge vendor",
+        ],
+    );
+    env.arch_stdout(&["index"]);
+    truth::assert_line_counts(&env.repo, &env.births());
+    assert_eq!(
+        env.sql_i64(
+            "SELECT COUNT(*) FROM commits c WHERE NOT EXISTS \
+                     (SELECT 1 FROM commit_parents p WHERE p.sha = c.sha)"
+        ),
+        2,
+        "two roots"
+    );
+}
+
+/// History rewritten under an indexed cache (reset + new commits, as after
+/// a force-push): the incremental index drops the lost commits.
+#[test]
+fn scenario_rewritten_history_reindexes_incrementally() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    for i in 0..3 {
+        write(&env, &[("f.txt", &numbered(i + 1))]);
+        commit_all(&env, T0 + i as i64 * DAY, "feat: grow");
+    }
+    env.arch_stdout(&["index"]);
+    git_at(&env, &at(T0), &["reset", "-q", "--hard", "HEAD~2"]);
+    for i in 0..2 {
+        write(&env, &[("g.txt", &numbered(i + 5))]);
+        commit_all(&env, T0 + (5 + i as i64) * DAY, "feat: other");
+    }
+    env.arch_stdout(&["index"]);
+    assert_eq!(env.sql_i64("SELECT COUNT(*) FROM commits"), 3);
+    env.assert_matches_git();
+}
+
+// ---- repo shapes the CLI refuses or warns about ----
+
+#[test]
+fn scenario_bare_detached_and_shallow_repos() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    for i in 0..2 {
+        write(&env, &[("f.txt", &numbered(i + 1))]);
+        commit_all(&env, T0 + i as i64 * DAY, "feat: f");
+    }
+    let src = env.repo.clone();
+    let run = |repo: &std::path::Path| {
+        Command::new(BIN)
+            .arg("--repo")
+            .arg(repo)
+            .arg("index")
+            .env("XDG_DATA_HOME", &env.xdg_data)
+            .env("XDG_CONFIG_HOME", &env.xdg_config)
+            .output()
+            .unwrap()
+    };
+    let clone = |args: &[&str], dst: &str| {
+        let dst = env.root.path().join(dst);
+        let ok = Command::new("git")
+            .args(["clone", "-q"])
+            .args(args)
+            .arg(format!("file://{}", src.display()))
+            .arg(&dst)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        dst
+    };
+
+    let bare = run(&clone(&["--bare"], "bare.git"));
+    assert!(!bare.status.success());
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("bare repositories are not supported"));
+
+    let shallow = run(&clone(&["--depth", "1"], "shallow"));
+    assert!(shallow.status.success());
+    assert!(String::from_utf8_lossy(&shallow.stderr).contains("shallow clone"));
+
+    git_at(&env, &at(T0), &["checkout", "-q", "--detach", "HEAD~1"]);
+    let detached = run(&env.repo);
+    assert!(!detached.status.success());
+    assert!(String::from_utf8_lossy(&detached.stderr).contains("detached HEAD"));
+}
+
+// ---- languages ----
+
+/// Grammar-less languages and the Kotlin/C#/Swift grammars reach `stats`,
+/// `burndown` and `hotspot`.
+#[test]
+fn scenario_new_languages_reach_reports() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    init(&env);
+    write(
+        &env,
+        &[
+            ("ci.yml", "# ci\non: push\n"),
+            ("Cargo.toml", "[package]\nname = \"x\" # c\n"),
+            ("Makefile", "all:\n\techo hi\n"),
+            ("app/Main.kt", "fun main() {\n    println(1)\n}\n"),
+            ("Program.cs", "class P {\n    void M() {}\n}\n"),
+            ("main.swift", "// s\nfunc go() {}\n"),
+        ],
+    );
+    commit_all(&env, T0, "feat: polyglot");
+    env.arch_stdout(&["index", "--bucket", "commit"]);
+
+    let stats: Vec<String> = env
+        .rows(&["stats"])
+        .iter()
+        .map(|r| {
+            let c: Vec<&str> = r.split('\t').collect();
+            // lang files code comments funcs
+            format!("{} {} {} {} {}", c[0], c[1], c[3], c[4], c[8])
+        })
+        .collect();
+    for want in [
+        "YAML 1 1 1 0",
+        "TOML 1 2 0 0",
+        "Makefile 1 2 0 0",
+        "Kotlin 1 3 0 1",
+        "C# 1 3 0 1",
+        "Swift 1 1 1 1",
+    ] {
+        assert!(
+            stats.iter().any(|s| s == want),
+            "missing {want:?} in {stats:#?}"
+        );
+    }
+    assert!(env
+        .rows(&["burndown", "--by", "language"])
+        .contains(&format!("{T0}\tYAML\t1")));
+    let hot = env.rows(&["hotspot", "--lang", "kotlin"]);
+    assert!(
+        hot.iter().any(|r| r.contains("\tmain\tfn\tKotlin\t")),
+        "{hot:?}"
+    );
 }
