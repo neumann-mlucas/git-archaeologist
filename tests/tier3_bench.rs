@@ -6,13 +6,8 @@
 //! peak RSS.
 //!
 //! Skipped cleanly per-fixture when no network and no cached clone.
-//! Set `TIER3_SKIP_LARGE=1` to skip mid-large fixtures (CI cost lever).
-//!
-//! ponytail: hercules / git-of-theseus side-by-side rows deferred —
-//! their CLIs shift across versions and we have no reliable install to
-//! test against. Upgrade path: when either tool is on PATH in CI,
-//! shell out for an equivalent burndown/loc pass on the same fixture
-//! and log a side-by-side row (non-gating per TASKS Phase 5 Tier 3).
+//! Set `TIER3_SKIP_LARGE=1` (`SKIP_LARGE=1 just bench`) to skip mid-large
+//! fixtures.
 
 #![cfg(feature = "bench-large")]
 

@@ -1281,9 +1281,10 @@ fn ts_comment_ranges(root: Node, comment_kinds: &[&str]) -> Vec<(usize, usize)> 
 /// double-quoted strings so `"src/*.rs"` opens nothing. Sorted, disjoint.
 ///
 /// ponytail: double quotes only, no per-language string or raw-string
-/// rules. A comment marker inside a single-quoted string mid-line can
-/// misfile at most that line's tail; add per-language quotes if tokei
-/// drift shows up on a fixture.
+/// rules. A line marker inside a single-quoted string misfiles that
+/// line's tail (harmless: code before it keeps the line code); a block
+/// opener there swallows lines up to the next close. Add per-language
+/// quotes if tokei drift shows up on a fixture.
 fn plain_comment_ranges(src: &[u8], line: &[&str], block: &[(&str, &str)]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
