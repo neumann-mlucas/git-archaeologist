@@ -78,12 +78,13 @@ run churn-author     churn --by author
 # hotspot needs --lang; run for each tree-sitter lang with a fn grammar
 # and skip langs with no rows. Lang strings must match `file_stats.language`
 # lowercased (so `c++` not `cpp`, `vim script` not `vim`). Filename slug
-# swaps spaces → `-` and `+` → `p` so paths stay portable.
+# swaps spaces → `-`, `+` → `p`, `#` → `sharp` so paths stay portable.
 LANGS=(rust python javascript typescript tsx go c "c++" lua "vim script"
-       java ruby bash php ocaml scala haskell)
+       java ruby bash php ocaml scala haskell kotlin "c#" swift)
 for lang in "${LANGS[@]}"; do
   slug="${lang// /-}"
   slug="${slug//+/p}"
+  slug="${slug//#/sharp}"
   out="$OUT/hotspot-${slug}.tsv"
   "$BIN" --repo "$REPO" hotspot --lang "$lang" --top 30 --format tsv \
     >"$out" 2>/dev/null || { rm -f "$out"; continue; }
