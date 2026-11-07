@@ -4,6 +4,8 @@
 //! whatever `--format` the user asked for. Filter plumbing lives in the
 //! `Filters` type so every subcommand accepts the same SPEC §Filters set.
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Context, Result};
 use duckdb::types::ValueRef;
 use time::format_description::well_known::Iso8601;
@@ -567,7 +569,18 @@ pub fn survival(cache: &Cache, filters: &Filters, fit_exp: bool) -> Result<Table
     let mut table = run_sql(cache, &sql)?;
 
     if fit_exp {
-        table = fit_half_life(&table)?;
+        // Bucket keys are YYYYWW / YYYYMMDD / unix seconds / tag index, so
+        // ages come from each bucket's last commit time, in days.
+        let days = run_sql(
+            cache,
+            "SELECT bucket_key, MAX(authored_at) / 86400.0 FROM commits GROUP BY bucket_key",
+        )?;
+        let days: HashMap<String, f64> = days
+            .rows
+            .into_iter()
+            .filter_map(|r| Some((r[0].clone(), r[1].parse().ok()?)))
+            .collect();
+        table = fit_half_life(&table, &days)?;
     }
 
     Ok(table)
@@ -575,8 +588,9 @@ pub fn survival(cache: &Cache, filters: &Filters, fit_exp: bool) -> Result<Table
 
 /// Take the survival table (birth_bucket, born, alive, dead, survival)
 /// and fit an exponential decay ln(survival) = -λ * age to derive a
-/// half-life scalar. Gated on ≥ 100 total deletion events per SPEC.
-fn fit_half_life(table: &Table) -> Result<Table> {
+/// half-life scalar in days. Gated on ≥ 100 total deletion events per SPEC
+/// and ≥ 2 partly-dead cohorts. `days` maps bucket key → day number.
+fn fit_half_life(table: &Table, days: &HashMap<String, f64>) -> Result<Table> {
     let dead_col = table
         .headers
         .iter()
@@ -605,10 +619,9 @@ fn fit_half_life(table: &Table) -> Result<Table> {
             .get(survival_col)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-        let b: f64 = row
-            .get(bucket_col)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
+        let Some(&b) = row.get(bucket_col).and_then(|k| days.get(k)) else {
+            continue;
+        };
         if s > 0.0 && s < 1.0 {
             xs.push(b);
             ys.push(s.ln());
@@ -625,11 +638,18 @@ fn fit_half_life(table: &Table) -> Result<Table> {
     ];
     let mut rows: Vec<Vec<String>> = Vec::new();
 
-    if total_deaths < 100 || xs.len() < 2 {
+    let short = if total_deaths < 100 {
+        Some(format!("{total_deaths} deletion events (need >= 100)"))
+    } else if xs.len() < 2 {
+        Some(format!("{} partly-dead cohorts (need >= 2)", xs.len()))
+    } else {
+        None
+    };
+    if let Some(why) = short {
         rows.push(vec![
             "half_life".to_string(),
             String::new(),
-            format!("insufficient data: {total_deaths} deletion events (need >= 100)"),
+            format!("insufficient data: {why}"),
         ]);
         return Ok(Table { headers, rows });
     }
