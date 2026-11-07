@@ -455,28 +455,6 @@ fn wipe_data(cache: &Cache) -> Result<()> {
     Ok(())
 }
 
-/// Parse HEAD's tree live into temp tables `head_stats(path, language,
-/// code, comments, blanks)` and `head_funcs(path, start_line, end_line)`
-/// for `stats`. Sampled snapshots can trail HEAD, so they aren't reused.
-/// Warns when `line_births` (age/owner) was folded at a different HEAD.
-pub fn snapshot_head(repo: &Repo, cache: &Cache) -> Result<()> {
-    let head = repo.git.head_id().context("resolving HEAD")?.to_string();
-    let indexed: Option<String> = cache
-        .conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'indexed_head_sha'",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
-    if indexed.as_deref() != Some(head.as_str()) {
-        eprintln!(
-            "warning: cache indexed at a different HEAD; age/owner/churn are stale — run `index`"
-        );
-    }
-    snapshot(repo, cache, Some(&head), "head")
-}
-
 /// Resolve a revspec (`HEAD~3`, branch, tag, sha) to a commit sha.
 pub fn resolve_rev(repo: &Repo, spec: &str) -> Result<String> {
     Ok(repo
@@ -491,7 +469,8 @@ pub fn resolve_rev(repo: &Repo, spec: &str) -> Result<String> {
 }
 
 /// Parse `sha`'s tree into temp tables `{name}_stats` / `{name}_funcs`.
-/// `None` leaves them empty. Grammar-backed files only.
+/// `None` leaves them empty. Grammar-backed files only. Parsed live: sampled
+/// snapshots can trail HEAD, so they aren't reused.
 pub fn snapshot(repo: &Repo, cache: &Cache, sha: Option<&str>, name: &str) -> Result<()> {
     cache.conn.execute_batch(&format!(
         "CREATE OR REPLACE TEMP TABLE {name}_stats (path TEXT, language TEXT, code INTEGER, comments INTEGER, blanks INTEGER, test_code INTEGER);

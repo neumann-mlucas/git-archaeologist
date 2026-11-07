@@ -673,8 +673,9 @@ fn fit_half_life(table: &Table) -> Result<Table> {
 }
 
 /// tokei-style snapshot of HEAD, grouped by language | dir | file, with a
-/// `Total` row. Needs `index::snapshot_head` temp tables. Files without a
-/// grammar count as language `other` (lines only, no code/comment split).
+/// `Total` row. Needs `index::snapshot` temp tables named `head`. Files
+/// without a grammar count as language `other` (lines only, no
+/// code/comment split).
 ///
 /// `lines`, `median_age_days`, `owner` come from `line_births` (surviving
 /// lines + birth commit); `churn_90d` = added + deleted in the last 90 days.

@@ -326,7 +326,7 @@ fn main() -> Result<()> {
             };
             let table = if base.is_none() && tip == index::resolve_rev(&repo, "HEAD")? {
                 ensure_indexed(&repo, &mut cache, cfg_bucket, false)?;
-                index::snapshot_head(&repo, &cache)?;
+                index::snapshot(&repo, &cache, Some(&tip), "head")?;
                 query::stats(&cache, &filters, &by, depth)?
             } else {
                 index::snapshot(&repo, &cache, Some(&tip), "rev")?;
@@ -407,6 +407,18 @@ fn ensure_indexed(
                 bucket_override: bucket,
             },
         )?;
+    } else if let Ok(head) = repo.git.head_id() {
+        let indexed: Option<String> = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'indexed_head_sha'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if indexed != Some(head.to_string()) {
+            eprintln!("warning: cache indexed at a different HEAD; history is stale — run `index`");
+        }
     }
     Ok(())
 }
