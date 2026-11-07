@@ -50,6 +50,11 @@ pub struct CommitDiff {
 
 const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024;
 
+/// Source x destination pairs a commit may compare before edited renames
+/// degrade to add + delete: git's default (`diff.renameLimit` = 1000 per
+/// side). gix's own default of 1000 pairs stops at about 32 moved files.
+const RENAME_LIMIT: usize = 1_000_000;
+
 /// Run the diff over a slice of jobs. Each rayon worker opens its own
 /// `gix::Repository` via `map_init` — gix::Repository is `!Sync` but
 /// re-opening the same `.git/` from N threads is safe.
@@ -119,9 +124,10 @@ fn diff_one(
     let parent_tree_ref = parent_tree_obj.as_ref().unwrap_or(&empty_tree);
 
     let mut platform = parent_tree_ref.changes().context("starting tree diff")?;
-    platform
-        .track_path()
-        .track_rewrites(Some(Rewrites::default()));
+    platform.track_path().track_rewrites(Some(Rewrites {
+        limit: RENAME_LIMIT,
+        ..Rewrites::default()
+    }));
 
     platform
         .for_each_to_obtain_tree(

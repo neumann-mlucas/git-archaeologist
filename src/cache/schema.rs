@@ -1,7 +1,7 @@
 use anyhow::Result;
 use duckdb::Connection;
 
-pub const SCHEMA_VERSION: &str = "6";
+pub const SCHEMA_VERSION: &str = "7";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
