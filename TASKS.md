@@ -552,6 +552,11 @@ Kept from prior TASKS for future reference. Not planned; capture, revisit.
 - Plain-text docs (`.txt`) stay `other`: too generic to label.
 - Syntax test detection for Kotlin / C# / Swift (`@Test`, `[Fact]`,
   `XCTestCase`); path rules only today.
+- `hotspot` attribution: hunks are matched to function spans from the
+  file's latest snapshot, so old pure deletions land on whatever
+  function now sits at that line (godot: the 2020-07 GDScript parser
+  rewrite shows as `annotation_exists`, −6,837). Match against the
+  snapshot nearest each commit instead.
 - `.git-blame-ignore-revs` → `stats` ownership: the flag is stored
   (`commits.ignored_blame`), no report reads it.
 

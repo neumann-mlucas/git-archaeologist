@@ -7,138 +7,121 @@ TSV / CSV / JSON / Parquet. One DuckDB cache per repo; every query returns
 in under a second after the initial index.
 
 Backed by `gix` (pure-Rust git), `duckdb` (columnar cache), and
-`tree-sitter` (20 grammars). No plotting, no UI, no daemon.
+`tree-sitter` (23 grammars, plus line counts for 30+ languages without
+one). No plotting, no UI, no daemon.
 
 Status: **v1 in development.** See [SPEC.md](SPEC.md) and [TASKS.md](TASKS.md).
 
 ## Metrics
 
-Every sample below is real output from a run against the
-[neovim](https://github.com/neovim/neovim) repository: **40,227 commits,
-1,641 authors, 12 years of history (2014-W05 → 2026-W31, 651 weekly
-buckets).** Indexer wall time on a dev laptop: ~4 min. Cache size:
-~570 MB. Query latency: < 1 s.
+Samples below are real output from the three fixtures the test harness
+pins (`benches/fixtures.toml`), indexed with the current build on an
+8-core laptop. Every ref is walked, so commit counts exceed `git
+rev-list --count HEAD`.
 
-Tables below sample seven milestone years (2014 → 2026, every 2 yr).
-Bars (age, survival) are `█` at 1× / 40-column scale.
+| fixture                                           | commits (non-merge) | authors | span              | bucket | index  | cache  |
+| ------------------------------------------------- | ------------------- | ------- | ----------------- | ------ | ------ | ------ |
+| [ratatui](https://github.com/ratatui/ratatui)     | 2,589 (2,574)       | 367     | 2016-10 → 2026-07 | day    | 38 s   | 149 MB |
+| [uv](https://github.com/astral-sh/uv)             | 13,164 (13,111)     | 725     | 2023-10 → 2026-08 | week   | 213 s  | 175 MB |
+| [godot](https://github.com/godotengine/godot) 4.3 | 66,099 (36,084)     | 3,258   | 2013-04 → 2024-08 | month  | 69 min | 1.0 GB |
 
-### Overview: commits per year
-
-```
-year      commits
-2014        2,139
-2015        1,714
-2016        1,798
-2017        2,491
-2018        1,911
-2019        2,383
-2020        1,680
-2021        2,273
-2022        3,681
-2023        3,961
-2024        3,235
-2025        3,626
-2026        2,918
-total      33,810   (non-merge; 651 weekly buckets)
-```
-
-Commit volume roughly doubled from the 2014-2020 baseline (~2k / yr) to
-the 2022-2025 era (~3.5k / yr). 2026 is a partial year.
+Godot's index time is a known problem; see TASKS §Perf plan. Most
+samples use godot, rolled up to years for print.
 
 ### `burndown`
 
-Cumulative LOC per bucket. `--by language | author | module`. Top-5
-languages at year-end:
+Cumulative LOC per bucket. `--by language | author | module | kind`.
+Godot's six biggest languages at year end (`C` includes `.h` headers):
 
 ```
-year     Vim Script          Lua            C     Markdown         Bash
-2014        133,808        9,319      165,960          809          292
-2016        142,616       53,835      177,296        1,016          762
-2018        179,703       91,115      199,586        1,453        1,799
-2020        203,299      125,165      218,277        1,557        2,157
-2022        276,431      172,025      247,288        1,730        2,098
-2024        315,269      260,920      262,134        2,016        1,137
-2026        343,785      331,067      276,382        2,032        1,301
+year          C++          C   PO File      XML     C#    GLSL
+2014      269,794    586,674         -   82,704      -   1,253
+2016      316,858    706,158   111,684   51,278      -   1,530
+2018      545,254    775,210   246,266   67,220  6,959   7,046
+2020      817,543    883,885 1,332,796   85,010 14,707  10,786
+2022    1,202,540    968,933   892,000  115,973 27,849  20,195
+2024    1,299,960  1,186,469   467,164  145,363 34,947  22,276
 ```
 
-Lua closed a 156k-line gap on Vim Script from 2014 to 2026 and now sits
-within 4% of it. C grew steadily but far more slowly than Lua. Bash
-peaked around 2020 then shrank — a script-consolidation episode.
+C++ overtook C in 2022. Translation catalogs (`PO File`) ballooned to
+1.3M lines in 2020 and have been shrinking since. C# arrives with the
+Mono module in 2018.
+
+`--by kind` splits test code from the rest; at 4.3, godot is 3.16M lines
+of code and 52k lines of test code.
 
 ### `survival`
 
 Kaplan-Meier survival per birth cohort. `--fit exp` fits
-`ln(survival) = −λ·age` and returns a scalar half-life.
-
+`ln(survival) = −λ·age` and returns a half-life in days, with ages taken
+from each bucket's last commit time (so any `--bucket` gives days).
 Lines are tracked along HEAD's first-parent chain, so counts match HEAD
 exactly, and lines from a merged branch are born at the merge that landed
-them: `survival`, `cohort` and `stats` age/owner credit that commit, not the
-branch commit. Squash-merge histories are unaffected.
+them: `survival`, `cohort` and `stats` age/owner credit that commit, not
+the branch commit.
 
 ```
-half_life = 580.9 days   (n=650 buckets, 1,968,479 deletion events)
+metric      value   reason
+half_life   915.241 ok (n=124, deaths=11293117)
 ```
 
-Aggregated to yearly cohorts (bar = survival %):
+Godot cohorts rolled up to years:
 
 ```
-year       born      alive       dead   survival%
-2014  1,330,801    451,480    879,321      33.9%   ██████
-2015    142,164     28,896    113,268      20.3%   ████
-2016    137,024     61,791     75,233      45.1%   █████████
-2017    215,687     95,684    120,003      44.4%   ████████
-2018    105,815     58,300     47,515      55.1%   ███████████
-2019    147,699     49,031     98,668      33.2%   ██████
-2020    100,337     35,452     64,885      35.3%   ███████
-2021    199,871    101,603     98,268      50.8%   ██████████
-2022    350,690    183,411    167,279      52.3%   ██████████
-2023    327,165    194,350    132,815      59.4%   ███████████
-2024    282,593    182,034    100,559      64.4%   ████████████
-2025    226,775    175,174     51,601      77.2%   ███████████████
-2026    170,408    151,344     19,064      88.8%   █████████████████
+year       born      alive        dead  survival%
+2014  2,288,926    290,709   1,998,217      12.7%
+2016    923,515     65,348     858,167       7.1%
+2018    815,886    153,942     661,944      18.9%
+2020  3,113,651    671,919   2,441,732      21.6%
+2021  1,144,092    480,393     663,699      42.0%
+2022  2,272,324    672,826   1,599,498      29.6%
+2023  1,518,544  1,172,834     345,710      77.2%
+2024    723,117    661,815      61,302      91.5%
 ```
 
-Monotonic ramp from 34% (2014) to 89% (2026) is exactly what the
-`survival --fit exp` scalar fits.
+Code from the 2014 open-source release is 87% gone; the Godot 4
+rewrite years (2020, 2022) churned millions of lines that did not last.
+
+### `cohort`
+
+Cohort-stacked surviving LOC per bucket (`bucket, cohort, alive_lines`):
+the per-bucket series behind a Theseus-style stream plot. `survival
+--fit exp` is the scalar that summarizes its decay.
 
 ### `coupling`
 
 Top-N file pairs by co-occurrence in commits. `--max-files-per-commit N`
-(default 50) drops squash / import commits.
+(default 50) drops squash / import commits. On godot the top ten are all
+`.cpp` / `.h` pairs plus the visual-server interface:
 
 ```
-path_a                              path_b                              co_commits
-runtime/doc/options.txt             src/nvim/options.lua                        437
-runtime/lua/vim/filetype.lua        test/old/testdir/test_filetype.vim          320
-runtime/lua/vim/_meta/options.lua   src/nvim/options.lua                        270
-runtime/doc/options.txt             runtime/lua/vim/_meta/options.lua           268
-runtime/lua/vim/_meta/vimfn.lua     src/nvim/eval.lua                           248
-src/nvim/eval.c                     src/nvim/version.c                          246
-runtime/doc/eval.txt                src/nvim/eval.c                             237
-src/nvim/ex_cmds.c                  src/nvim/ex_docmd.c                         216
-src/nvim/eval.c                     src/nvim/ex_docmd.c                         213
-src/nvim/ex_docmd.c                 src/nvim/ex_getln.c                         207
+path_a                                 path_b                           co_commits
+editor/editor_node.cpp                 editor/editor_node.h                    291
+scene/gui/text_edit.cpp                scene/gui/text_edit.h                   211
+scene/main/viewport.cpp                scene/main/viewport.h                   172
+servers/visual/visual_server_raster.h  servers/visual_server.h                 150
+scene/main/node.cpp                    scene/main/node.h                       142
 ```
 
 ### `hotspot`
 
 Top-N functions by churn per bucket. `--lang <L>` required. Columns:
-`bucket, path, func, kind, language, added, deleted, churn`.
+`bucket, path, func, kind, language, added, deleted, churn`. `--lang c++`
+on godot:
 
 ```
-bucket   path                                 func              added  deleted  churn
-202229   src/nvim/edit.c                      get_literal           0    3,517  3,517
-202233   src/nvim/screen.c                    fill_foldcolumn       0    2,542  2,542
-202232   src/nvim/spell.c                     ex_spellrepall        3    2,046  2,049
-202225   src/nvim/getchar.c                   vgetorpeek            0    1,978  1,978
-202137   src/nvim/viml/parser/expressions.c   viml_pexpr_parse    942    1,014  1,956
-202234   src/nvim/search.c                    current_search        2    1,804  1,806
-202210   src/nvim/regexp.c                    getoctchrs            6    1,798  1,804
-201932   src/nvim/change.c                    open_line         1,101      626  1,727
+bucket  path                                         func                  added  deleted  churn
+202007  modules/gdscript/gdscript_parser.cpp         annotation_exists         4    6,837  6,841
+202211  thirdparty/vulkan/include/vulkan/vulkan_funcs.hpp  VULKAN_HPP_INLINE  2,870  3,206  6,076
+202011  core/variant_op.cpp                          evaluate              1,381    4,282  5,663
+202109  thirdparty/glslang/.../glslang_tab.cpp       yyparse               2,885    2,256  5,141
+202007  modules/gdscript/gdscript_parser.cpp         GDScriptParser        2,964    1,997  4,961
 ```
 
-`--lang lua` on the same repo top-heavy on `test/functional/` — the Lua
-churn story lives in the test suite, not the core.
+A hunk is credited to the function whose span, in the file's latest
+snapshot, holds the hunk's first line. Cheap, but old hunks drift: a
+pure deletion lands on whichever function now sits at that line (the
+GDScript parser rewrite of 2020-07 shows up as `annotation_exists`).
 
 ### `stats`
 
@@ -147,43 +130,26 @@ tokei-style snapshot of HEAD (parsed live, not the working tree), grouped
 `Total` row. Beyond line counts: test code (`test_code`, `test_pct` of
 code lines — see [Test detection](#test-detection)), function count +
 longest function, median age of surviving lines, top owner by surviving
-lines, 90-day churn. Files without a grammar show as `other` (lines only).
-Filters: `--lang`, `--path`. This repo:
+lines, 90-day churn (relative to today). Files with no language show as
+`other` (lines only). Filters: `--lang`, `--path`. uv, top rows:
 
 ```
-=============================================================================================================================================
- Lang      Files  Lines  Code  Comments  Blanks  Test Code  Test Pct  Funcs  Max Func  Median Age Days  Owner           Owner Pct  Churn 90d
-=============================================================================================================================================
- Rust         21   7976  6705       666     605       2727      40.7    269       368               95  neumann-mlucas        100       3105
- Markdown      4   2065  1678         0     387          0         0      0                         95  neumann-mlucas        100        213
- Bash          1    366   298        39      29          0         0      3         9               95  neumann-mlucas        100        153
- other         7    299                                                   0                         94  neumann-mlucas        100          5
- JSON          1     14    14         0       0          0         0      0                         94  neumann-mlucas        100          0
----------------------------------------------------------------------------------------------------------------------------------------------
- Total        34  10720  8695       705    1021       2727      31.4    272       368               95  neumann-mlucas        100       3476
-=============================================================================================================================================
+Lang      Files   Lines    Code  Comments  Blanks  Test Code  Test Pct  Funcs  Max Func  Median Age Days  Owner           Owner Pct
+Rust        485  238858  187012     25783   26063      96211      51.4   5557      1162              829  Charlie Marsh        50.6
+other       177   52711                                                     0                        816  Andrew Gallant       35.1
+Markdown     75   24709   16492         0    8217          0         0      0                        821  Zanie Blue           49.1
+JSON          4   15845   15845         0       0          0         0      0                        765  Zanie Blue           67.6
+TOML         98    5919    4924       499     496          0         0      0                        816  Andrew Gallant       42.8
+Python       66    5830    4407       480     943        352         8    181       214              838  Charlie Marsh        50.5
+YAML         11    3469    2827       202     440          0         0      0                        921  Charlie Marsh        37.1
+Total       931  348130  232025     27127   36267      96563      41.6   5740      1162              822  Charlie Marsh        43.1
 ```
 
-`burndown --by kind` gives the same test / non-test split per bucket.
-
-`--rev <commit>` snapshots another commit (`HEAD~3`, branch, tag, sha);
-`--rev A..B` prints the per-group delta B − A (empty side = `HEAD`, groups
-with no change dropped, `test_pct` in percentage points). Both are
-parse-only: no `median_age_days`/`owner`/`churn_90d`, grammar-less files
-omitted, `lines` = code + comments + blanks.
-
-```
-$ git-archaeologist stats --by file --rev HEAD~2..HEAD
-===========================================================================================
- File                     Files  Lines  Code  Comments  Blanks  Test Code  Test Pct  Funcs
-===========================================================================================
- src/index/treesitter.rs      0    571   502        36      33        189       3.7     27
- src/query.rs                 0    106    99         5       2          0      -0.8      2
- ...
--------------------------------------------------------------------------------------------
- Total                        0    833   738        50      45        240       0.1     32
-===========================================================================================
-```
+Half of uv's Rust is tests. `--rev <commit>` snapshots another commit;
+`--rev A..B` prints the per-group delta B − A (empty side = `HEAD`,
+groups with no change dropped, `test_pct` in percentage points). Both
+are parse-only: no `median_age_days`/`owner`/`churn_90d`, grammar-less
+files omitted, `lines` = code + comments + blanks.
 
 #### Test detection
 
@@ -213,95 +179,52 @@ code that only tests call (needs a call graph).
 
 ### `age`
 
-File-age histogram, 7-day bins in raw output. Rolled up to 5 tiers
-here:
-
-```
-0-90d                                              94
-90d-1yr   █                                       204
-1-2yr     ███                                     403
-2-5yr     ███████████                           1,431
-5yr+      ████████████████████████████████████  4,797
-```
-
-70% of files on disk today are older than 5 years — a fossil-heavy
-codebase with a thin recent skin.
+File-age histogram, 7-day bins, measured from today (not from HEAD).
+Godot's pinned 4.3 is two years old, so nothing is younger than 812
+days: 4,644 files are 2–5 years old, 6,378 older.
 
 ### `churn`
 
 Added / deleted per group per bucket. `--by module | lang | author`.
-When `--by module`, `--depth N` (default `1`) controls path-segment
-granularity — `1` = top-level dir, `2` = one level deeper, and so on.
-
-`--by module --depth 1`, net churn (added − deleted) per year for the
-top-4 modules ranked by lifetime activity (added + deleted):
+`--by module --depth N` (default `1`) groups by the first N path
+segments; files with fewer segments keep their full path. Godot, net
+lines (added − deleted) per year, top five modules by lifetime churn:
 
 ```
-year               src         runtime            test     third-party
-2014          +604,534        +287,742         +30,247         -67,700
-2016           -61,362          +5,996         +50,279            +480
-2018           +44,244          +8,252         +10,050          +2,261
-2020            +4,900          +8,521          +9,725             +48
-2022           +44,788         +41,294         +23,224            -159
-2024           -27,993         +25,643         +56,171              +0
-2026           +12,243         +16,951         +37,578              +0
+year        editor   thirdparty       doc   drivers     tools
+2014             -            -    62,201   862,999   290,687
+2016             -      102,579     9,925   -77,188   275,675
+2018       178,217     -135,533    10,021    23,291         -
+2020        43,731      652,248 1,422,245   -22,082         -
+2022       886,526      -76,692    19,799     7,885         -
+2024       101,104      162,478     6,897     4,019         -
 
-net           +762,333        +529,720        +390,695         -65,617
-churn        2,991,229       1,399,496         893,239         306,133
+net        484,457    1,263,738   198,016   925,095   573,505
+churn    7,705,423    6,080,158 4,203,614 2,653,165 1,885,913
 ```
 
-Same query at `--depth 2` — the story sharpens: `src/nvim` is the C
-core, `test/functional` is where the Lua-migration test churn lives,
-`runtime/lua` grows every year from 2020 onward (Lua module rewrites),
-and `runtime/doc` was a one-shot import wave in 2014.
-
-```
-year         src/nvim   test/functional   runtime/doc   runtime/lua
-2014          +66,759            +4,774      +104,502            +0
-2016          -61,393           +48,163        +1,314            +0
-2018          +44,229            +9,544          +714           +14
-2020          +17,400            +9,411        +2,804        +4,139
-2022          +43,288           +23,041       +11,948        +9,350
-2024           +7,756           +34,876        +7,018        +9,298
-2026          +10,644           +25,785        +4,075        +9,588
-
-net          +256,806          +279,511      +143,975       +98,320
-churn       2,167,876           702,277       500,173       283,070
-```
-
-Files with fewer than `depth` segments group under their full path
-(root-level files stay as-is).
+`tools/` ends in 2017 when the editor moved to `editor/`; `doc/`'s 2020
+spike is the class-reference translation import.
 
 ### `classify`
 
-Conventional Commit type counts per bucket. Unparseable subjects fall
-into `untyped`. Last 10 weeks:
+Conventional Commit type counts per bucket: `commits, fixes, feats,
+reverts, breaking, untyped`. Types are case-insensitive, `!` or a
+`BREAKING CHANGE:` footer marks breaking, git's own `Revert "…"` counts
+as a revert. ratatui per year:
 
 ```
-bucket   commits  fixes  feats  reverts  breaking  untyped
-202622        51     12      1        0         0       28
-202623        47     15      2        0         1       18
-202624        88     25      8        0         1       29
-202625        90     30      3        0         0       38
-202626        88     29      6        0         1       35
-202627       110     34     11        0         0       36
-202628        84     35      6        0         4        4
-202629        99     31     11        0         1       13
-202630       104     31      7        0         0       31
-202631       100     32      6        0         1       25
+year  commits  feats  fixes  reverts  breaking  untyped
+2018       84     11      5        0         0       47
+2020      148     25     23        0         0       37
+2022       29      3      1        0         1        4
+2023      445     76     63        1        19       20
+2024      772    162    114        0        40       12
+2025      473     52     35        1        11       12
 ```
 
-Weekly commit volume ~50 → ~100 through mid-2026; `feats` and `fixes`
-roughly track each other; `breaking` mostly zero with occasional 1-4
-weeks. `untyped` skews heavy some weeks (usually doc-only commits
-under `runtime/`).
-
-### `cohort`
-
-Cohort-stacked surviving LOC per bucket. Pairs with `survival` — the
-scalar half-life (`survival --fit exp`) is the shape's decay parameter;
-`cohort` gives you the per-bucket stacked series to plot as a full
-Theseus-style stream.
+The project adopted Conventional Commits around its 2023 revival:
+`untyped` drops from most commits to ~2%.
 
 ### Utility subcommands
 
@@ -341,11 +264,14 @@ git-archaeologist coupling --top 20
 
 Common to every query subcommand:
 
-- `--from YYYY-MM-DD` / `--to YYYY-MM-DD` — inclusive date bounds.
+- `--from YYYY-MM-DD` / `--to YYYY-MM-DD` — inclusive UTC days.
 - `--lang rust,python` — comma-list language filter.
 - `--author SUBSTR` — canonical-name / email substring.
 - `--path PREFIX` — path prefix filter.
-- `--bucket auto|day|week|month|tag|commit` — bucketing.
+- `--bucket auto|day|week|month|tag|commit` — bucketing, fixed at index
+  time. On a query it only applies if that query builds the cache;
+  otherwise it warns. Re-key with `index --bucket X`. Keys: commit =
+  unix seconds, day = YYYYMMDD, week = ISO YYYYWW, month = YYYYMM.
 - `--format tsv|csv|json|table` — default: `tsv` on pipe, `table` on TTY.
 - `--by language|author|module` — group axis for `burndown` / `churn`
   (`burndown` also takes `kind`: test vs non-test code).
@@ -353,8 +279,8 @@ Common to every query subcommand:
 Subcommand-specific:
 
 - `coupling --max-files-per-commit N` (default 50).
-- `survival --fit exp` — half-life scalar; returns NULL + `reason`
-  column when < 100 deletion events.
+- `survival --fit exp` — half-life in days; NULL + `reason` when there
+  are < 100 deletion events or < 2 partly-dead cohorts.
 - `hotspot --top N --lang L` — `--lang` required.
 - `stats --by lang|dir|file --depth N [--rev C | --rev A..B]` — commit snapshot or delta; only `--lang`/`--path` filters.
 - `churn --depth N` (default 1) — path-segment granularity for
@@ -382,11 +308,15 @@ without an export step.
 
 ### Raw SQL
 
+Code per language at the latest sampled commit:
+
 ```sh
-git-archaeologist sql "SELECT language, SUM(code)
-                       FROM   file_stats
-                       WHERE  bucket_key >= 20240101
-                       GROUP  BY language
+git-archaeologist sql "SELECT fs.language, SUM(fs.code)
+                       FROM   file_stats fs
+                       JOIN   commits c USING (sha)
+                       WHERE  c.bucket_key = (SELECT MAX(bucket_key)
+                                              FROM commits WHERE is_sampled)
+                       GROUP  BY 1
                        ORDER  BY 2 DESC"
 ```
 
@@ -438,17 +368,37 @@ raw = [
 
 ## Language support
 
-20 tree-sitter grammars built in.
+Detection is by exact file name (`Makefile`, `Dockerfile`,
+`CMakeLists.txt`), then extension. No content sniffing.
 
-- **Core 9** (full function extraction): Rust, Python, JavaScript,
-  TypeScript (`.ts` + `.tsx`), Go, C, C++, Lua, Vim Script.
-- **Extended 11** (LOC + comment split; function extraction best-effort
-  by conventional node names): Java, Ruby, Bash, HTML, CSS, JSON, PHP,
-  OCaml, Scala, Haskell, Markdown.
+- **Tree-sitter, functions + test regions:** Rust, Python, JavaScript,
+  TypeScript (`.ts` + `.tsx`), Go, C++, Java, Ruby, PHP; C (path-rule
+  tests only).
+- **Tree-sitter, best-effort functions:** Lua, Vim Script, Bash, OCaml,
+  Scala, Haskell, Kotlin, C#, Swift.
+- **Tree-sitter, lines only:** HTML, CSS, JSON, Markdown.
+- **No grammar, lines only** (comment prefixes + block delimiters):
+  YAML, TOML, XML, INI, Dockerfile, Makefile, CMake, SQL, Protocol
+  Buffers, Nix, HCL, Sass, LESS, Vue, Svelte, Perl, R, Julia, Elixir,
+  Erlang, Dart, Zig, Objective-C, Objective-C++, Groovy, Gradle,
+  PowerShell, GLSL, GDScript, PO File, Fish, Zsh, Nushell,
+  ReStructuredText.
 
-Line-level metrics work on any file the diff engine sees. Function-level
-metrics (hotspot, function-cohort, test / code split) need `fn_kinds` —
-all Core 9 plus Java, Ruby, Bash, PHP, OCaml, Scala, Haskell.
+Anything else (`.txt`, extensionless files) still counts in cohort,
+survival and `stats` (as `other`), but not in `burndown --by language`.
+
+## Development
+
+```sh
+just --list         # recipes
+just lint           # rustfmt, clippy -D warnings, dprint
+just test           # unit + golden + scenarios
+just e2e            # ratatui smoke vs git, blame, tokei (clones once)
+just bench          # ratatui / uv / godot perf ceilings (SKIP_LARGE=1 skips godot)
+just regen-goldens  # after an intentional output change
+```
+
+GitHub CI runs only fmt, clippy and `cargo test`.
 
 ## Stack
 
