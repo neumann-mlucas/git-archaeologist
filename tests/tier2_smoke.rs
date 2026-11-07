@@ -12,6 +12,7 @@
 
 mod common;
 
+use common::truth;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -214,6 +215,13 @@ fn tier2_public_repo_smoke() {
             "cohort surviving ({cohort_alive}) vs current sampled code ({total_code}) off by {ratio:.3} (bound 0.5)"
         );
     }
+
+    // --- line_births vs git, code + blanks vs tokei ---
+    let (births, _) = env.arch_stdout(&["sql", truth::BIRTHS_SQL, "--format", "tsv"]);
+    truth::assert_line_counts(&repo, &births);
+    truth::assert_blame_close(&repo, &births);
+    let (stats, _) = env.arch_stdout(&["stats", "--format", "tsv"]);
+    truth::assert_tokei_close(&repo, &stats);
 
     // --- coupling top row has co_commits > 1 ---
     let (coup, _) = env.arch_stdout(&["coupling", "--top", "1", "--format", "tsv"]);

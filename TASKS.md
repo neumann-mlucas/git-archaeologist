@@ -251,9 +251,10 @@ subcommand + assertions) in ~100s on a dev box.
 - [x] Perf ceilings: index ≤ 180 s, any query ≤ 5 s. Real observed on
       dev box: index ~90 s, cohort ~2.4 s. SPEC targets (30 s / 500 ms)
       remain a v1.x aspiration; documented `ponytail:` in the test.
-- [ ] Total code lines within ±1% of `tokei --output json .` — tokei
-      cut from the dep tree in Phase 0. Re-add as `have_tokei()`
-      conditional if a real user needs it.
+- [x] `code + blanks` per language within ±0.5% of tokei (Rust, Python,
+      JSON), skipped without tokei. Not code alone: tokei counts blank
+      lines inside strings as code (Rust on uv: 3% off, all of it that).
+- [x] `line_births` vs `git show HEAD:path` line counts, per file.
 
 ### Indexer perf ✅
 

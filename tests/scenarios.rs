@@ -854,6 +854,80 @@ fn scenario_age_buckets_floor() {
     );
 }
 
+/// A move of 40 files, each also edited, keeps the unedited lines' births.
+/// Past gix's default limit of 1000 source x destination pairs these fall
+/// back to add + delete, and every line looks born at the move.
+#[test]
+fn scenario_mass_rename_with_edits_keeps_births() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    let body = |i: usize, last: &str| {
+        let lines: Vec<String> = (0..9).map(|j| format!("file {i} line {j}")).collect();
+        format!("{}\n{last}\n", lines.join("\n"))
+    };
+    let files: Vec<(String, String)> = (0..40)
+        .map(|i| (format!("old/f{i}.txt"), body(i, "before")))
+        .collect();
+    let writes: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_str()))
+        .collect();
+    one_commit(&env, &writes);
+    for i in 0..40 {
+        std::fs::write(env.repo.join(format!("old/f{i}.txt")), body(i, "after")).unwrap();
+    }
+    dsl::build(
+        &env.repo,
+        &[Action::rename(
+            "Alice",
+            "2025-01-02T00:00:00Z",
+            "refactor: move",
+            "old",
+            "new",
+        )],
+    );
+    env.arch_stdout(&["index"]);
+    env.assert_matches_git();
+}
+
+/// A commit after `index` makes every report warn on stderr until the next
+/// `index`, while the output itself stays the cached answer.
+#[test]
+fn scenario_moved_head_warns_until_reindexed() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    one_commit(&env, &[("a.txt", "1\n")]);
+    let warned = |args: &[&str]| {
+        let out = env.arch(args);
+        assert!(out.status.success(), "arch {args:?} failed");
+        String::from_utf8_lossy(&out.stderr).contains("different HEAD")
+    };
+    env.arch_stdout(&["index"]);
+    assert!(!warned(&["age"]), "fresh cache warned");
+
+    dsl::build(
+        &env.repo,
+        &[Action::commit(
+            "Alice",
+            "1700000000 +0000",
+            "feat: more",
+            &[("b.txt", "1\n")],
+        )],
+    );
+    for args in [&["age"][..], &["stats"], &["sql", "SELECT 1"]] {
+        assert!(warned(args), "{args:?} didn't warn");
+    }
+
+    env.arch_stdout(&["index"]);
+    assert!(!warned(&["age"]), "reindexed cache warned");
+}
+
 /// Minified JS repeats a name on one line, which `funcs` can't key apart:
 /// `index` must keep one row instead of aborting on the primary key.
 #[test]

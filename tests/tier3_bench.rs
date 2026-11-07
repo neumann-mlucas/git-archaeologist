@@ -18,7 +18,7 @@
 
 mod common;
 
-use common::Fixture;
+use common::{truth, Fixture};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -174,6 +174,17 @@ fn run_one(fx: &Fixture) -> Option<Report> {
         );
         query_times.push((label.to_string(), e));
     }
+
+    // Same checks as Tier 2, on the bigger repos.
+    let tsv = |args: &[&str]| {
+        let out = arch(&repo, xdg_data.path(), xdg_config.path(), args);
+        assert!(out.status.success(), "{}: {args:?} failed", fx.name);
+        String::from_utf8(out.stdout).expect("utf-8 stdout")
+    };
+    let births = tsv(&["sql", truth::BIRTHS_SQL, "--format", "tsv"]);
+    truth::assert_line_counts(&repo, &births);
+    truth::assert_blame_close(&repo, &births);
+    truth::assert_tokei_close(&repo, &tsv(&["stats", "--format", "tsv"]));
 
     Some(Report {
         name: fx.name.clone(),
