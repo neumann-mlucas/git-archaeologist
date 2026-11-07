@@ -347,10 +347,10 @@ Ranked:
    - **Done:** Markdown + JSON counted by `Parse::Plain` (their
      grammars extracted nothing): uv 160 → 137 s, identical counts on
      uv and ratatui.
-   - **Written, unmeasured:** keep the previous chunk's parses so
-     unchanged files at a chunk boundary aren't re-parsed (bounded to
-     one chunk). Only saves unchanged, mostly small files; benchmark
-     on a quiet machine before committing.
+   - **Tried, dropped:** keeping the previous chunk's parses so
+     unchanged files at a chunk boundary aren't re-parsed. uv CPU time
+     790 s with it vs 775 s without: no gain, as the hot files differ
+     at every sample anyway.
    - Next, by expected payoff: fewer sampled commits by default
      (cost is per sample: uv weekly = 149 samples, godot monthly =
      129 of a 1M-line tree); tree-sitter incremental re-parse from the
