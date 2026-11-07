@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use gix::bstr::ByteSlice;
 use gix::diff::Rewrites;
 use imara_diff::intern::InternedInput;
+use imara_diff::sources::lines_with_terminator;
 use imara_diff::{Algorithm, Sink};
 use rayon::prelude::*;
 
@@ -365,7 +366,10 @@ impl Sink for HunkSink {
 fn diff_bytes(old: &[u8], new: &[u8]) -> (Vec<HunkRange>, u32, u32) {
     let old_str = String::from_utf8_lossy(old);
     let new_str = String::from_utf8_lossy(new);
-    let input = InternedInput::new(old_str.as_ref(), new_str.as_ref());
+    let input = InternedInput::new(
+        lines_with_terminator(&old_str),
+        lines_with_terminator(&new_str),
+    );
     let hunks = imara_diff::diff(Algorithm::Histogram, &input, HunkSink(Vec::new()));
     let mut added = 0u32;
     let mut deleted = 0u32;
