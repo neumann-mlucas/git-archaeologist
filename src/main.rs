@@ -420,6 +420,24 @@ fn ensure_indexed(
             eprintln!("warning: cache indexed at a different HEAD; history is stale — run `index`");
         }
     }
+    // Buckets are fixed at index time; a query's `--bucket` can't re-key them.
+    if let (false, Some(want)) = (empty || force_full, bucket) {
+        let have: Option<String> = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'bucket_size'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if have.as_deref() != Some(format!("{want:?}").as_str()) {
+            let want = format!("{want:?}").to_lowercase();
+            eprintln!(
+                "warning: cache is bucketed by {}, not {want} — run `index --bucket {want}`",
+                have.as_deref().unwrap_or("unknown").to_lowercase()
+            );
+        }
+    }
     Ok(())
 }
 
