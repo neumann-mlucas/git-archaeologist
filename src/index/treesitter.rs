@@ -78,10 +78,23 @@ enum TestDetect {
     Php,
 }
 
+/// How a language's lines get classified.
+#[derive(Clone)]
+enum Parse {
+    /// tree-sitter: comment nodes, functions, test regions.
+    Grammar(Language),
+    /// No grammar: comments by line prefix and block delimiters, lines
+    /// only (no functions, path-rule tests only).
+    Plain {
+        line: &'static [&'static str],
+        block: &'static [(&'static str, &'static str)],
+    },
+}
+
 #[derive(Clone)]
 struct LangSpec {
     label: &'static str,
-    language: Language,
+    parse: Parse,
     comment_kinds: &'static [&'static str],
     /// Node kinds that count as a top-level function definition.
     fn_kinds: &'static [&'static str],
@@ -96,8 +109,32 @@ struct LangSpec {
 
 pub struct LangRegistry {
     by_ext: HashMap<&'static str, LangSpec>,
+    /// Whole file names that carry no telling extension (`Makefile`).
+    by_name: HashMap<&'static str, LangSpec>,
     parser: Parser,
 }
+
+/// Spec for a language without a grammar.
+fn plain(
+    label: &'static str,
+    line: &'static [&'static str],
+    block: &'static [(&'static str, &'static str)],
+) -> LangSpec {
+    LangSpec {
+        label,
+        parse: Parse::Plain { line, block },
+        comment_kinds: &[],
+        fn_kinds: &[],
+        method_kinds: &[],
+        method_ancestor_kinds: &[],
+        test_detect: TestDetect::None,
+    }
+}
+
+const HASH: &[&str] = &["#"];
+const SLASH: &[&str] = &["//"];
+const C_BLOCK: &[(&str, &str)] = &[("/*", "*/")];
+const XML_BLOCK: &[(&str, &str)] = &[("<!--", "-->")];
 
 impl LangRegistry {
     pub fn new() -> Self {
@@ -112,7 +149,7 @@ impl LangRegistry {
             &["rs"],
             LangSpec {
                 label: "Rust",
-                language: tree_sitter_rust::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_rust::LANGUAGE.into()),
                 comment_kinds: &["line_comment", "block_comment"],
                 fn_kinds: &["function_item"],
                 method_kinds: &[],
@@ -124,7 +161,7 @@ impl LangRegistry {
             &["py"],
             LangSpec {
                 label: "Python",
-                language: tree_sitter_python::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_python::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
@@ -136,7 +173,7 @@ impl LangRegistry {
             &["js", "mjs", "cjs", "jsx"],
             LangSpec {
                 label: "JavaScript",
-                language: tree_sitter_javascript::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_javascript::LANGUAGE.into()),
                 comment_kinds: &["comment", "html_comment"],
                 fn_kinds: &["function_declaration", "generator_function_declaration"],
                 method_kinds: &["method_definition"],
@@ -148,7 +185,7 @@ impl LangRegistry {
             &["ts"],
             LangSpec {
                 label: "TypeScript",
-                language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                parse: Parse::Grammar(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
                 comment_kinds: &["comment", "html_comment"],
                 fn_kinds: &[
                     "function_declaration",
@@ -164,7 +201,7 @@ impl LangRegistry {
             &["tsx"],
             LangSpec {
                 label: "TSX",
-                language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+                parse: Parse::Grammar(tree_sitter_typescript::LANGUAGE_TSX.into()),
                 comment_kinds: &["comment", "html_comment"],
                 fn_kinds: &[
                     "function_declaration",
@@ -180,7 +217,7 @@ impl LangRegistry {
             &["go"],
             LangSpec {
                 label: "Go",
-                language: tree_sitter_go::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_go::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_declaration"],
                 method_kinds: &["method_declaration"],
@@ -192,7 +229,7 @@ impl LangRegistry {
             &["c", "h"],
             LangSpec {
                 label: "C",
-                language: tree_sitter_c::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_c::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
@@ -204,7 +241,7 @@ impl LangRegistry {
             &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
             LangSpec {
                 label: "C++",
-                language: tree_sitter_cpp::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_cpp::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
@@ -216,7 +253,7 @@ impl LangRegistry {
             &["lua"],
             LangSpec {
                 label: "Lua",
-                language: tree_sitter_lua::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_lua::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_declaration"],
                 method_kinds: &[],
@@ -231,7 +268,7 @@ impl LangRegistry {
                 // Older API: `fn language() -> Language` instead of a
                 // `LANGUAGE: LanguageFn` const like everyone else. No
                 // .into() call.
-                language: tree_sitter_vim::language(),
+                parse: Parse::Grammar(tree_sitter_vim::language()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
@@ -243,7 +280,7 @@ impl LangRegistry {
             &["java"],
             LangSpec {
                 label: "Java",
-                language: tree_sitter_java::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_java::LANGUAGE.into()),
                 comment_kinds: &["line_comment", "block_comment"],
                 fn_kinds: &[],
                 method_kinds: &["method_declaration", "constructor_declaration"],
@@ -255,7 +292,7 @@ impl LangRegistry {
             &["rb"],
             LangSpec {
                 label: "Ruby",
-                language: tree_sitter_ruby::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_ruby::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["method"],
                 method_kinds: &[],
@@ -267,7 +304,7 @@ impl LangRegistry {
             &["sh", "bash"],
             LangSpec {
                 label: "Bash",
-                language: tree_sitter_bash::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_bash::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
@@ -279,7 +316,7 @@ impl LangRegistry {
             &["html", "htm"],
             LangSpec {
                 label: "HTML",
-                language: tree_sitter_html::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_html::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &[],
                 method_kinds: &[],
@@ -291,7 +328,7 @@ impl LangRegistry {
             &["css"],
             LangSpec {
                 label: "CSS",
-                language: tree_sitter_css::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_css::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &[],
                 method_kinds: &[],
@@ -303,7 +340,7 @@ impl LangRegistry {
             &["json"],
             LangSpec {
                 label: "JSON",
-                language: tree_sitter_json::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_json::LANGUAGE.into()),
                 comment_kinds: &[],
                 fn_kinds: &[],
                 method_kinds: &[],
@@ -315,7 +352,7 @@ impl LangRegistry {
             &["php"],
             LangSpec {
                 label: "PHP",
-                language: tree_sitter_php::LANGUAGE_PHP.into(),
+                parse: Parse::Grammar(tree_sitter_php::LANGUAGE_PHP.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &["method_declaration"],
@@ -327,7 +364,7 @@ impl LangRegistry {
             &["ml", "mli"],
             LangSpec {
                 label: "OCaml",
-                language: tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+                parse: Parse::Grammar(tree_sitter_ocaml::LANGUAGE_OCAML.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["let_binding"],
                 method_kinds: &[],
@@ -339,7 +376,7 @@ impl LangRegistry {
             &["scala", "sc"],
             LangSpec {
                 label: "Scala",
-                language: tree_sitter_scala::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_scala::LANGUAGE.into()),
                 comment_kinds: &["comment", "block_comment"],
                 fn_kinds: &["function_definition"],
                 method_kinds: &[],
@@ -351,7 +388,7 @@ impl LangRegistry {
             &["hs"],
             LangSpec {
                 label: "Haskell",
-                language: tree_sitter_haskell::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_haskell::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function"],
                 method_kinds: &[],
@@ -363,7 +400,7 @@ impl LangRegistry {
             &["md", "markdown"],
             LangSpec {
                 label: "Markdown",
-                language: tree_sitter_md::LANGUAGE.into(),
+                parse: Parse::Grammar(tree_sitter_md::LANGUAGE.into()),
                 comment_kinds: &[],
                 fn_kinds: &[],
                 method_kinds: &[],
@@ -371,9 +408,117 @@ impl LangRegistry {
                 test_detect: TestDetect::None,
             },
         );
+        add(
+            &["kt", "kts"],
+            LangSpec {
+                label: "Kotlin",
+                parse: Parse::Grammar(tree_sitter_kotlin_ng::LANGUAGE.into()),
+                comment_kinds: &["line_comment", "block_comment"],
+                fn_kinds: &["function_declaration"],
+                method_kinds: &[],
+                method_ancestor_kinds: &["class_declaration", "object_declaration"],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["cs"],
+            LangSpec {
+                label: "C#",
+                parse: Parse::Grammar(tree_sitter_c_sharp::LANGUAGE.into()),
+                comment_kinds: &["comment"],
+                fn_kinds: &["local_function_statement"],
+                method_kinds: &["method_declaration", "constructor_declaration"],
+                method_ancestor_kinds: &[],
+                test_detect: TestDetect::None,
+            },
+        );
+        add(
+            &["swift"],
+            LangSpec {
+                label: "Swift",
+                parse: Parse::Grammar(tree_sitter_swift::LANGUAGE.into()),
+                comment_kinds: &["comment", "multiline_comment"],
+                fn_kinds: &["function_declaration", "init_declaration"],
+                method_kinds: &[],
+                // class_declaration also covers struct / enum / extension.
+                method_ancestor_kinds: &["class_declaration", "protocol_declaration"],
+                test_detect: TestDetect::None,
+            },
+        );
+
+        // No grammar: lines only. Labels follow tokei's names.
+        add(&["yml", "yaml"], plain("YAML", HASH, &[]));
+        add(&["toml"], plain("TOML", HASH, &[]));
+        add(
+            &["xml", "xsd", "xsl", "xslt", "plist"],
+            plain("XML", &[], XML_BLOCK),
+        );
+        add(&["ini", "cfg"], plain("INI", &[";", "#"], &[]));
+        add(&["dockerfile"], plain("Dockerfile", HASH, &[]));
+        add(&["mk", "mak"], plain("Makefile", HASH, &[]));
+        add(&["cmake"], plain("CMake", HASH, &[]));
+        add(&["sql"], plain("SQL", &["--"], C_BLOCK));
+        add(&["proto"], plain("Protocol Buffers", SLASH, C_BLOCK));
+        add(&["nix"], plain("Nix", HASH, C_BLOCK));
+        add(
+            &["tf", "tfvars", "hcl"],
+            plain("HCL", &["#", "//"], C_BLOCK),
+        );
+        add(&["scss", "sass"], plain("Sass", SLASH, C_BLOCK));
+        add(&["less"], plain("LESS", SLASH, C_BLOCK));
+        // ponytail: one comment syntax for the whole file; tokei splits the
+        // <script>/<style> parts. Fine for LOC trends.
+        add(
+            &["vue"],
+            plain("Vue", SLASH, &[("<!--", "-->"), ("/*", "*/")]),
+        );
+        add(
+            &["svelte"],
+            plain("Svelte", SLASH, &[("<!--", "-->"), ("/*", "*/")]),
+        );
+        add(&["pl", "pm"], plain("Perl", HASH, &[]));
+        add(&["r"], plain("R", HASH, &[]));
+        add(&["jl"], plain("Julia", HASH, &[("#=", "=#")]));
+        add(&["ex", "exs"], plain("Elixir", HASH, &[]));
+        add(&["erl", "hrl"], plain("Erlang", &["%"], &[]));
+        add(&["dart"], plain("Dart", SLASH, C_BLOCK));
+        add(&["zig"], plain("Zig", SLASH, &[]));
+        add(&["m"], plain("Objective-C", SLASH, C_BLOCK));
+        add(&["mm"], plain("Objective-C++", SLASH, C_BLOCK));
+        add(&["groovy"], plain("Groovy", SLASH, C_BLOCK));
+        add(&["gradle"], plain("Gradle", SLASH, C_BLOCK));
+        add(&["ps1", "psm1"], plain("PowerShell", HASH, &[("<#", "#>")]));
+        add(
+            &["glsl", "vert", "frag", "geom", "comp", "tesc", "tese"],
+            plain("GLSL", SLASH, C_BLOCK),
+        );
+        add(&["gd"], plain("GDScript", HASH, &[]));
+        add(&["po", "pot"], plain("PO File", HASH, &[]));
+        add(&["fish"], plain("Fish", HASH, &[]));
+        add(&["zsh"], plain("Zsh", HASH, &[]));
+        add(&["nu"], plain("Nushell", HASH, &[]));
+        add(&["rst"], plain("ReStructuredText", &[], &[]));
+
+        let mut by_name = HashMap::new();
+        for (names, spec) in [
+            (
+                &["Makefile", "makefile", "GNUmakefile"][..],
+                plain("Makefile", HASH, &[]),
+            ),
+            (
+                &["Dockerfile", "Containerfile"],
+                plain("Dockerfile", HASH, &[]),
+            ),
+            (&["CMakeLists.txt"], plain("CMake", HASH, &[])),
+        ] {
+            for n in names {
+                by_name.insert(*n, spec.clone());
+            }
+        }
 
         Self {
             by_ext: m,
+            by_name,
             parser: Parser::new(),
         }
     }
@@ -383,7 +528,12 @@ impl LangRegistry {
     }
 
     fn spec_for(&self, path: &str) -> Option<&LangSpec> {
-        let ext = Path::new(path).extension().and_then(|s| s.to_str())?;
+        let p = Path::new(path);
+        let name = p.file_name().and_then(|s| s.to_str())?;
+        if let Some(spec) = self.by_name.get(name) {
+            return Some(spec);
+        }
+        let ext = p.extension().and_then(|s| s.to_str())?;
         self.by_ext.get(ext.to_ascii_lowercase().as_str())
     }
 }
@@ -525,23 +675,28 @@ fn parse_blob(
         return None;
     }
 
-    let spec = registry.spec_for(path)?;
-    let label = spec.label.to_string();
-    let language = spec.language.clone();
-    let spec_snapshot = spec.clone();
-
-    registry.parser.set_language(&language).ok()?;
-    let tree: Tree = registry.parser.parse(&*blob.data, None)?;
-
-    let root = tree.root_node();
-    let tests = test_regions(&blob.data, root, spec_snapshot.test_detect);
-    let (code, comments, blanks, test_code) =
-        count_lines(&blob.data, root, spec_snapshot.comment_kinds, &tests);
-    let mut funcs = extract_funcs(&blob.data, root, &spec_snapshot);
-    mark_test_funcs(&mut funcs, &tests);
+    let spec = registry.spec_for(path)?.clone();
+    let (code, comments, blanks, test_code, funcs) = match &spec.parse {
+        Parse::Plain { line, block } => {
+            let ranges = plain_comment_ranges(&blob.data, line, block);
+            let (c, m, b, t) = count_lines(&blob.data, &ranges, &[]);
+            (c, m, b, t, Vec::new())
+        }
+        Parse::Grammar(language) => {
+            registry.parser.set_language(language).ok()?;
+            let tree: Tree = registry.parser.parse(&*blob.data, None)?;
+            let root = tree.root_node();
+            let tests = test_regions(&blob.data, root, spec.test_detect);
+            let ranges = ts_comment_ranges(root, spec.comment_kinds);
+            let (c, m, b, t) = count_lines(&blob.data, &ranges, &tests);
+            let mut funcs = extract_funcs(&blob.data, root, &spec);
+            mark_test_funcs(&mut funcs, &tests);
+            (c, m, b, t, funcs)
+        }
+    };
 
     Some(CachedParse {
-        language: label,
+        language: spec.label.to_string(),
         code,
         comments,
         blanks,
@@ -588,7 +743,7 @@ fn is_test_path(path: &str) -> bool {
         "py" => stem.starts_with("test_") || stem.ends_with("_test") || stem == "conftest",
         "rb" => stem.ends_with("_test") || stem.ends_with("_spec") || stem.starts_with("test_"),
         "rs" => stem == "tests",
-        "java" | "kt" | "scala" | "php" | "hs" | "cs" => {
+        "java" | "kt" | "kts" | "scala" | "php" | "hs" | "cs" | "swift" => {
             ["Test", "Tests", "IT", "Spec", "Suite", "TestCase"]
                 .iter()
                 .any(|s| stem.ends_with(s) && stem.len() > s.len())
@@ -1113,19 +1268,64 @@ fn in_regions(row: usize, regions: &[Region]) -> bool {
 
 /// (code, comments, blanks, test_code) — test_code counts code lines
 /// whose row is inside a test region.
-fn count_lines(
-    source: &[u8],
-    root: Node,
-    comment_kinds: &[&str],
-    tests: &[Region],
-) -> (u32, u32, u32, u32) {
+/// Byte ranges of `comment_kinds` nodes, sorted by start.
+fn ts_comment_ranges(root: Node, comment_kinds: &[&str]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    collect_comment_ranges(root, comment_kinds, &mut ranges);
+    ranges.sort_unstable_by_key(|r| r.0);
+    ranges
+}
+
+/// Comment byte ranges for a grammar-less language: a `line` prefix runs to
+/// end of line, a `block` pair spans to its close (or end of file). Skips
+/// double-quoted strings so `"src/*.rs"` opens nothing. Sorted, disjoint.
+///
+/// ponytail: double quotes only, no per-language string or raw-string
+/// rules. A comment marker inside a single-quoted string mid-line can
+/// misfile at most that line's tail; add per-language quotes if tokei
+/// drift shows up on a fixture.
+fn plain_comment_ranges(src: &[u8], line: &[&str], block: &[(&str, &str)]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        let rest = &src[i..];
+        if rest[0] == b'"' {
+            // Skip to the closing quote on the same line.
+            let mut j = i + 1;
+            while j < src.len() && src[j] != b'"' && src[j] != b'\n' {
+                j += if src[j] == b'\\' { 2 } else { 1 };
+            }
+            i = (j + 1).min(src.len());
+            continue;
+        }
+        if let Some((open, close)) = block.iter().find(|(o, _)| rest.starts_with(o.as_bytes())) {
+            let body = i + open.len();
+            let end = src[body..]
+                .windows(close.len())
+                .position(|w| w == close.as_bytes())
+                .map_or(src.len(), |p| body + p + close.len());
+            out.push((i, end));
+            i = end;
+            continue;
+        }
+        if line.iter().any(|p| rest.starts_with(p.as_bytes())) {
+            let end = rest
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(src.len(), |p| i + p);
+            out.push((i, end));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn count_lines(source: &[u8], ranges: &[(usize, usize)], tests: &[Region]) -> (u32, u32, u32, u32) {
     if source.is_empty() {
         return (0, 0, 0, 0);
     }
-
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    collect_comment_ranges(root, comment_kinds, &mut ranges);
-    ranges.sort_unstable_by_key(|r| r.0);
 
     let mut blanks = 0u32;
     let mut comments = 0u32;
@@ -1135,7 +1335,7 @@ fn count_lines(
 
     let mut classify = |start: usize, end: usize| {
         let line = &source[start..end];
-        match classify_line(line, start, &ranges) {
+        match classify_line(line, start, ranges) {
             LineKind::Blank => blanks += 1,
             LineKind::Comment => comments += 1,
             LineKind::Code => {
@@ -1212,17 +1412,30 @@ fn collect_comment_ranges(node: Node, comment_kinds: &[&str], out: &mut Vec<(usi
 mod tests {
     use super::*;
 
+    impl LangSpec {
+        fn grammar(&self) -> &Language {
+            match &self.parse {
+                Parse::Grammar(l) => l,
+                Parse::Plain { .. } => panic!("{} has no grammar", self.label),
+            }
+        }
+    }
+
     fn count(lang: Language, comment_kinds: &[&str], src: &str) -> (u32, u32, u32) {
         let mut parser = Parser::new();
         parser.set_language(&lang).unwrap();
         let tree = parser.parse(src.as_bytes(), None).unwrap();
-        let (c, m, b, _) = count_lines(src.as_bytes(), tree.root_node(), comment_kinds, &[]);
+        let (c, m, b, _) = count_lines(
+            src.as_bytes(),
+            &ts_comment_ranges(tree.root_node(), comment_kinds),
+            &[],
+        );
         (c, m, b)
     }
 
     fn parse_and_extract(src: &str, spec: &LangSpec) -> Vec<FuncDef> {
         let mut parser = Parser::new();
-        parser.set_language(&spec.language).unwrap();
+        parser.set_language(spec.grammar()).unwrap();
         let tree = parser.parse(src.as_bytes(), None).unwrap();
         let mut funcs = extract_funcs(src.as_bytes(), tree.root_node(), spec);
         let regions = test_regions(src.as_bytes(), tree.root_node(), spec.test_detect);
@@ -1326,7 +1539,11 @@ int main() {
         assert!(r.spec_for("foo.cxx").is_some());
         assert!(r.spec_for("foo.ts").is_some());
         assert!(r.spec_for("foo.tsx").is_some());
-        assert!(r.spec_for("Cargo.toml").is_none());
+        assert_eq!(r.label_for("Cargo.toml"), Some("TOML"));
+        assert_eq!(r.label_for("a/b/Makefile"), Some("Makefile"));
+        assert_eq!(r.label_for("CMakeLists.txt"), Some("CMake"));
+        assert_eq!(r.label_for("notes.txt"), None);
+        assert_eq!(r.label_for("x.KT"), Some("Kotlin"));
         assert!(r.spec_for("README.md").is_some()); // Markdown grammar added
         assert!(r.spec_for("foo.unknown").is_none());
         assert!(r.spec_for("no_extension").is_none());
@@ -1472,6 +1689,75 @@ class C {
         assert_eq!(by_name.get("m").map(|s| s.as_str()), Some("method"));
     }
 
+    fn kinds(ext: &str, src: &str) -> HashMap<String, String> {
+        let reg = LangRegistry::new();
+        parse_and_extract(src, &spec_for(&reg, ext))
+            .into_iter()
+            .map(|d| (d.name, d.kind))
+            .collect()
+    }
+
+    #[test]
+    fn kotlin_extracts_fn_and_method() {
+        let k = kinds(
+            "kt",
+            "fun top() {}\n\nclass C {\n    fun m() = 1\n}\n\nobject O {\n    fun o() {}\n}\n",
+        );
+        assert_eq!(k["top"], "fn");
+        assert_eq!(k["m"], "method");
+        assert_eq!(k["o"], "method");
+    }
+
+    #[test]
+    fn csharp_extracts_methods_and_local_fn() {
+        let k = kinds(
+            "cs",
+            "class C {\n  C() {}\n  int M() { int L() => 1; return L(); }\n}\n",
+        );
+        assert_eq!(k["C"], "method");
+        assert_eq!(k["M"], "method");
+        // Local fns live inside a method body: not top-level defs.
+        assert!(!k.contains_key("L"));
+    }
+
+    #[test]
+    fn swift_extracts_fn_and_method() {
+        let k = kinds(
+            "swift",
+            "func top() {}\nstruct S { func m() {} }\nextension S { func e() {} }\n",
+        );
+        assert_eq!(k["top"], "fn");
+        assert_eq!(k["m"], "method");
+        assert_eq!(k["e"], "method");
+    }
+
+    fn plain_count(path: &str, src: &str) -> (u32, u32, u32) {
+        let reg = LangRegistry::new();
+        let Parse::Plain { line, block } = reg.spec_for(path).unwrap().parse else {
+            panic!("{path} has a grammar");
+        };
+        let ranges = plain_comment_ranges(src.as_bytes(), line, block);
+        let (c, m, b, _) = count_lines(src.as_bytes(), &ranges, &[]);
+        (c, m, b)
+    }
+
+    #[test]
+    fn plain_counts_line_comments() {
+        // code, comment, blank, code with trailing comment
+        assert_eq!(plain_count("a.yaml", "a: 1\n# c\n\nb: 2 # c\n"), (2, 1, 1));
+        // `#` inside a string opens nothing
+        assert_eq!(plain_count("a.toml", "x = \"#a\"\n  # c\n"), (1, 1, 0));
+    }
+
+    #[test]
+    fn plain_counts_block_comments() {
+        let sql = "/* a\n b */\nSELECT 1; -- c\n-- d\nSELECT '/' || \"/*\";\n";
+        assert_eq!(plain_count("q.sql", sql), (2, 3, 0));
+        // unclosed block runs to end of file
+        assert_eq!(plain_count("a.proto", "message M {}\n/* x\ny\n"), (1, 2, 0));
+        assert_eq!(plain_count("a.xml", "<a>\n<!-- c -->\n</a>\n"), (2, 1, 0));
+    }
+
     #[test]
     fn is_test_path_matrix() {
         assert!(is_test_path("tests/foo.rs"));
@@ -1507,7 +1793,7 @@ class C {
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, ext);
         let mut parser = Parser::new();
-        parser.set_language(&spec.language).unwrap();
+        parser.set_language(spec.grammar()).unwrap();
         let tree = parser.parse(src.as_bytes(), None).unwrap();
         test_regions(src.as_bytes(), tree.root_node(), spec.test_detect)
             .into_iter()
@@ -1684,11 +1970,14 @@ mod tests {
         let reg = LangRegistry::new();
         let spec = spec_for(&reg, "rs");
         let mut parser = Parser::new();
-        parser.set_language(&spec.language).unwrap();
+        parser.set_language(spec.grammar()).unwrap();
         let tree = parser.parse(src.as_bytes(), None).unwrap();
         let r = test_regions(src.as_bytes(), tree.root_node(), spec.test_detect);
-        let (code, comments, blanks, test_code) =
-            count_lines(src.as_bytes(), tree.root_node(), spec.comment_kinds, &r);
+        let (code, comments, blanks, test_code) = count_lines(
+            src.as_bytes(),
+            &ts_comment_ranges(tree.root_node(), spec.comment_kinds),
+            &r,
+        );
         assert_eq!((code, comments, blanks, test_code), (6, 1, 2, 5));
     }
 
