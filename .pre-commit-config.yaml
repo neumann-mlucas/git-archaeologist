@@ -21,6 +21,6 @@ repos:
       - id: clippy
         name: clippy
         language: system
-        entry: cargo clippy --all-targets --features bundled-duckdb -- -D warnings
+        entry: cargo clippy --all-targets -- -D warnings
         pass_filenames: false
         types: [rust]
