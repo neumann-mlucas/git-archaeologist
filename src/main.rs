@@ -212,6 +212,21 @@ enum ExportFormat {
 }
 
 fn main() -> Result<()> {
+    match run() {
+        Err(e) if is_broken_pipe(&e) => Ok(()),
+        r => r,
+    }
+}
+
+/// Reader closed stdout (`| head`): stop quietly, like other CLIs.
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)

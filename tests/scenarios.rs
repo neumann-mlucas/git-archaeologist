@@ -2073,3 +2073,39 @@ fn scenario_new_languages_reach_reports() {
         "{hot:?}"
     );
 }
+
+/// Reader closing the pipe early (`| head`) ends the run quietly: exit 0,
+/// nothing on stderr. Output is far past the pipe buffer, so a write fails.
+#[test]
+fn scenario_closed_stdout_exits_quietly() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    dsl::build(
+        &env.repo,
+        &[Action::commit(
+            "Alice",
+            "2025-01-01T00:00:00Z",
+            "feat: a",
+            &[("a.rs", "fn f() {}\n")],
+        )],
+    );
+    env.arch_stdout(&["index"]);
+    let mut child = Command::new(BIN)
+        .arg("--repo")
+        .arg(&env.repo)
+        .args(["sql", "SELECT * FROM range(1000000)"])
+        .env("XDG_DATA_HOME", &env.xdg_data)
+        .env("XDG_CONFIG_HOME", &env.xdg_config)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn git-archaeologist");
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "status {}: {err}", out.status);
+    assert!(err.is_empty(), "stderr: {err}");
+}
