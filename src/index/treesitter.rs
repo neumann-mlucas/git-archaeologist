@@ -337,18 +337,6 @@ impl LangRegistry {
             },
         );
         add(
-            &["json"],
-            LangSpec {
-                label: "JSON",
-                parse: Parse::Grammar(tree_sitter_json::LANGUAGE.into()),
-                comment_kinds: &[],
-                fn_kinds: &[],
-                method_kinds: &[],
-                method_ancestor_kinds: &[],
-                test_detect: TestDetect::None,
-            },
-        );
-        add(
             &["php"],
             LangSpec {
                 label: "PHP",
@@ -391,18 +379,6 @@ impl LangRegistry {
                 parse: Parse::Grammar(tree_sitter_haskell::LANGUAGE.into()),
                 comment_kinds: &["comment"],
                 fn_kinds: &["function"],
-                method_kinds: &[],
-                method_ancestor_kinds: &[],
-                test_detect: TestDetect::None,
-            },
-        );
-        add(
-            &["md", "markdown"],
-            LangSpec {
-                label: "Markdown",
-                parse: Parse::Grammar(tree_sitter_md::LANGUAGE.into()),
-                comment_kinds: &[],
-                fn_kinds: &[],
                 method_kinds: &[],
                 method_ancestor_kinds: &[],
                 test_detect: TestDetect::None,
@@ -497,6 +473,10 @@ impl LangRegistry {
         add(&["fish"], plain("Fish", HASH, &[]));
         add(&["zsh"], plain("Zsh", HASH, &[]));
         add(&["nu"], plain("Nushell", HASH, &[]));
+        // Prose and data: nothing to split, so a grammar would only cost
+        // parse time (Markdown was ~25% of it on uv) for identical counts.
+        add(&["json"], plain("JSON", &[], &[]));
+        add(&["md", "markdown"], plain("Markdown", &[], &[]));
         add(&["rst"], plain("ReStructuredText", &[], &[]));
 
         let mut by_name = HashMap::new();
@@ -1748,6 +1728,9 @@ class C {
         assert_eq!(plain_count("a.yaml", "a: 1\n# c\n\nb: 2 # c\n"), (2, 1, 1));
         // `#` inside a string opens nothing
         assert_eq!(plain_count("a.toml", "x = \"#a\"\n  # c\n"), (1, 1, 0));
+        // prose and data: every non-blank line is code, `#` included
+        assert_eq!(plain_count("README.md", "# h\n\ntext\n"), (2, 0, 1));
+        assert_eq!(plain_count("a.json", "{\n  \"a\": 1\n}\n"), (3, 0, 0));
     }
 
     #[test]

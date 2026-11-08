@@ -38,7 +38,7 @@ Answers questions like:
 - Output = parquet dump + subcommand-per-metric emitting TSV/CSV/JSON on
   stdout for piping.
 - Function-level metrics for the tree-sitter languages linked in
-  (§Language stack: 23 grammars), line counts for 30+ more without one.
+  (§Language stack: 21 grammars), line counts for 30+ more without one.
 
 ### Explicitly out of scope (v1)
 
@@ -188,7 +188,7 @@ Anything more exotic → `git-arch sql "SELECT ..."`.
 
 `aliases.toml` schema unchanged from prior spec.
 
-## Language stack — 23 grammars, plus line counts without one
+## Language stack — 21 grammars, plus line counts without one
 
 Grammars linked in statically (`src/index/treesitter.rs`, `LangRegistry`):
 
@@ -199,7 +199,9 @@ but with path-rule tests only.
 **Best-effort functions** (conventional node names, path-rule tests
 only): Lua, Vim Script, Bash, OCaml, Scala, Haskell, Kotlin, C#, Swift.
 
-**Lines only** (grammar, no functions): HTML, CSS, JSON, Markdown.
+**Lines only** (grammar, no functions): HTML, CSS. Markdown and JSON
+had grammars that extracted nothing; they moved to `Parse::Plain` for
+identical counts at ~15% less index time on uv.
 
 **No grammar** — `Parse::Plain`: comments by line prefix and block
 delimiters, double-quoted strings skipped; lines only. Labels follow
@@ -207,7 +209,8 @@ tokei: YAML, TOML, XML, INI, Dockerfile, Makefile, CMake, SQL, Protocol
 Buffers, Nix, HCL, Sass, LESS, Vue, Svelte, Perl, R, Julia, Elixir,
 Erlang, Dart, Zig, Objective-C, Objective-C++, Groovy, Gradle,
 PowerShell, GLSL, GDScript, PO File, Fish, Zsh, Nushell,
-ReStructuredText.
+ReStructuredText, Markdown, JSON (the last three: no comment syntax,
+every non-blank line is code).
 
 Non-negotiables:
 
@@ -630,7 +633,7 @@ Justify every crate on the fence.
 | --------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `gix`                       | pure-Rust git, no subprocess, gives hunks + rename via `blob_diff`  | shell out to `git` — slower per-commit                                    |
 | `duckdb` (unbundled)        | columnar OLAP + parquet native + window fns; new metric = new query | `sqlite` (row-store, slow on aggregations); polars (no persistence story) |
-| `tree-sitter` + 23 grammars | required for function-level + exact comment split                   | regex (approximate, no function-level)                                    |
+| `tree-sitter` + 21 grammars | required for function-level + exact comment split                   | regex (approximate, no function-level)                                    |
 | `rayon`                     | per-commit parallelism                                              | manual threading                                                          |
 | `clap`                      | CLI                                                                 | —                                                                         |
 | `plotters`                  | —                                                                   | **rejected** — no plotting in v1                                          |

@@ -7,7 +7,7 @@ TSV / CSV / JSON / Parquet. One DuckDB cache per repo; every query returns
 in under a second after the initial index.
 
 Backed by `gix` (pure-Rust git), `duckdb` (columnar cache), and
-`tree-sitter` (23 grammars, plus line counts for 30+ languages without
+`tree-sitter` (21 grammars, plus line counts for 30+ languages without
 one). No plotting, no UI, no daemon.
 
 Status: **v1 in development.** See [SPEC.md](SPEC.md) and [TASKS.md](TASKS.md).
@@ -376,13 +376,13 @@ Detection is by exact file name (`Makefile`, `Dockerfile`,
   tests only).
 - **Tree-sitter, best-effort functions:** Lua, Vim Script, Bash, OCaml,
   Scala, Haskell, Kotlin, C#, Swift.
-- **Tree-sitter, lines only:** HTML, CSS, JSON, Markdown.
+- **Tree-sitter, lines only:** HTML, CSS.
 - **No grammar, lines only** (comment prefixes + block delimiters):
   YAML, TOML, XML, INI, Dockerfile, Makefile, CMake, SQL, Protocol
   Buffers, Nix, HCL, Sass, LESS, Vue, Svelte, Perl, R, Julia, Elixir,
   Erlang, Dart, Zig, Objective-C, Objective-C++, Groovy, Gradle,
   PowerShell, GLSL, GDScript, PO File, Fish, Zsh, Nushell,
-  ReStructuredText.
+  ReStructuredText, Markdown, JSON.
 
 Anything else (`.txt`, extensionless files) still counts in cohort,
 survival and `stats` (as `other`), but not in `burndown --by language`.
