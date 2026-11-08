@@ -676,6 +676,142 @@ fn scenario_stats_rev_delta() {
     );
 }
 
+/// `stats --rev` across adds, deletes, a rename and a grammar-less file:
+/// one-sided groups in the delta, negative deltas, empty-left `..B`,
+/// `--by lang|file`, filters, the `--rev HEAD` fast path, bad revs.
+#[test]
+fn scenario_stats_rev_add_delete_rename() {
+    if !have_git() {
+        eprintln!("skip: git not on PATH");
+        return;
+    }
+    let env = Env::new();
+    dsl::build(
+        &env.repo,
+        &[
+            Action::commit(
+                "Alice",
+                "2025-01-01T00:00:00Z",
+                "feat: base",
+                &[
+                    ("src/a.rs", "fn f() {}\n"),
+                    ("lib/c.py", "x = 1\n"),
+                    ("notes.txt", "hi\nthere\n"),
+                ],
+            ),
+            Action::commit(
+                "Alice",
+                "2025-01-02T00:00:00Z",
+                "feat: add b",
+                &[("src/b.rs", "fn g() {}\nfn h() {}\n")],
+            ),
+            Action::delete(
+                "Alice",
+                "2025-01-03T00:00:00Z",
+                "chore: drop c",
+                &["lib/c.py"],
+            ),
+            Action::rename(
+                "Alice",
+                "2025-01-04T00:00:00Z",
+                "refactor: move a",
+                "src/a.rs",
+                "core/a.rs",
+            ),
+        ],
+    );
+    let rows = |args: &[&str]| -> Vec<String> {
+        let mut a = vec!["stats", "--format", "tsv"];
+        a.extend_from_slice(args);
+        env.arch_stdout(&a)
+            .lines()
+            .skip(1)
+            .map(|l| l.split('\t').take(9).collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    // name files lines code comments blanks test_code test_pct funcs
+    // One-sided groups: `core` only at HEAD, `lib` only at HEAD~3.
+    assert_eq!(
+        rows(&["--by", "dir", "--rev", "HEAD~3..HEAD"]),
+        [
+            "core 1 1 1 0 0 0 0 1",
+            "lib -1 -1 -1 0 0 0 0 0",
+            "src 0 1 1 0 0 0 0 1",
+            "Total 0 1 1 0 0 0 0 2"
+        ]
+    );
+    // Backwards range negates; empty left side means HEAD.
+    let back = [
+        "core -1 -1 -1 0 0 0 0 -1",
+        "lib 1 1 1 0 0 0 0 0",
+        "src 0 -1 -1 0 0 0 0 -1",
+        "Total 0 -1 -1 0 0 0 0 -2",
+    ];
+    assert_eq!(rows(&["--by", "dir", "--rev", "HEAD..HEAD~3"]), back);
+    assert_eq!(rows(&["--by", "dir", "--rev", "..HEAD~3"]), back);
+    assert_eq!(
+        rows(&["--by", "lang", "--rev", "HEAD~3..HEAD"]),
+        [
+            "Rust 1 2 2 0 0 0 0 2",
+            "Python -1 -1 -1 0 0 0 0 0",
+            "Total 0 1 1 0 0 0 0 2"
+        ]
+    );
+    // A rename is a delete + add between snapshots.
+    assert_eq!(
+        rows(&["--by", "file", "--rev", "HEAD~3..HEAD"]),
+        [
+            "src/b.rs 1 2 2 0 0 0 0 2",
+            "core/a.rs 1 1 1 0 0 0 0 1",
+            "lib/c.py -1 -1 -1 0 0 0 0 0",
+            "src/a.rs -1 -1 -1 0 0 0 0 -1",
+            "Total 0 1 1 0 0 0 0 2"
+        ]
+    );
+    assert_eq!(
+        rows(&["--by", "lang", "--rev", "HEAD~3..HEAD", "--lang", "python"]),
+        ["Python -1 -1 -1 0 0 0 0 0", "Total -1 -1 -1 0 0 0 0 0"]
+    );
+    assert_eq!(
+        rows(&["--by", "dir", "--rev", "HEAD~3..HEAD", "--path", "src/"]),
+        ["src 0 1 1 0 0 0 0 1", "Total 0 1 1 0 0 0 0 1"]
+    );
+    assert_eq!(
+        rows(&["--by", "dir", "--rev", "HEAD..HEAD"]),
+        ["Total 0 0 0 0 0 0 0 0"]
+    );
+    // Grammar-less `notes.txt` is absent from a `--rev` snapshot but shows
+    // in HEAD stats (dir `.`), so Totals differ for the same tree.
+    assert_eq!(
+        rows(&["--by", "dir", "--rev", "HEAD~3"]),
+        [
+            "lib 1 1 1 0 0 0 0 0",
+            "src 1 1 1 0 0 0 0 1",
+            "Total 2 2 2 0 0 0 0 1"
+        ]
+    );
+    let head = [
+        ". 1 2      0",
+        "src 1 2 2 0 0 0 0 2",
+        "core 1 1 1 0 0 0 0 1",
+        "Total 3 5 3 0 0 0 0 3",
+    ];
+    assert_eq!(rows(&["--by", "dir"]), head);
+    // `--rev HEAD` takes the full-stats path, not the parse-only one.
+    assert_eq!(rows(&["--by", "dir", "--rev", "HEAD"]), head);
+
+    for (bad, msg) in [
+        ("HEAD~1...HEAD", "--rev takes A..B, not A...B"),
+        ("nope", "resolving \"nope\""),
+        ("nope..HEAD", "resolving \"nope\""),
+    ] {
+        let out = env.arch(&["stats", "--rev", bad]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{bad} must fail");
+        assert!(err.contains(msg), "{bad}: {err}");
+    }
+}
+
 /// Commit `body` to `path` on the current branch through raw git.
 fn commit_file(env: &Env, date: &str, path: &str, body: &str, msg: &str) {
     std::fs::write(env.repo.join(path), body).unwrap();
