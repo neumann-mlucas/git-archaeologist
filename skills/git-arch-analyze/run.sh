@@ -57,7 +57,8 @@ if ! "$BIN" --repo "$REPO" index >"$OUT/_index.log" 2>&1; then
   tail -20 "$OUT/_index.log" >&2
   exit 3
 fi
-tail -3 "$OUT/_index.log" >&2
+# Progress uses \r; split it so the tail is the last 3 real lines.
+tr '\r' '\n' <"$OUT/_index.log" | grep -v '^index: ' | tail -3 >&2
 
 run burndown-lang    burndown --by language
 run burndown-author  burndown --by author
@@ -74,6 +75,16 @@ run age              age
 run churn-module     churn --by module
 run churn-module-d2  churn --by module --depth 2
 run churn-author     churn --by author
+run burndown-kind    burndown --by kind
+run stats-lang       stats --by lang
+run stats-dir        stats --by dir
+
+# Delta since the newest tag before HEAD (HEAD^, so a tagged HEAD compares
+# against the previous release). Skipped on untagged repos.
+SINCE_TAG="$(git -C "$REPO" describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+if [[ -n "$SINCE_TAG" ]]; then
+  run stats-since-tag stats --rev "$SINCE_TAG.."
+fi
 
 # hotspot needs --lang; run for each tree-sitter lang with a fn grammar
 # and skip langs with no rows. Lang strings must match `file_stats.language`
@@ -86,7 +97,7 @@ for lang in "${LANGS[@]}"; do
   slug="${slug//+/p}"
   slug="${slug//#/sharp}"
   out="$OUT/hotspot-${slug}.tsv"
-  "$BIN" --repo "$REPO" hotspot --lang "$lang" --top 30 --format tsv \
+  "$BIN" --repo "$REPO" hotspot --lang "$lang" --top 300 --format tsv \
     >"$out" 2>/dev/null || { rm -f "$out"; continue; }
   # Header-only file (< 2 lines) means no data for this lang — drop.
   if [[ "$(wc -l <"$out")" -lt 2 ]]; then
@@ -98,9 +109,23 @@ done
 
 {
   "$BIN" --repo "$REPO" sql "SELECT * FROM meta" --format tsv
+  [[ -z "$SINCE_TAG" ]] || printf 'since_tag\t%s\n' "$SINCE_TAG"
 } >"$OUT/_meta.txt" 2>/dev/null || true
 
 # --- SQL extractions (see SKILL.md § "SQL extractions") ---
+
+# Newest sampled commit on HEAD's first-parent chain. "Newest sampled
+# commit" alone is wrong: every ref is walked, so it can sit on another
+# branch ahead of HEAD. Prefix a query with "$HEAD_SNAP, next_cte AS (...)".
+HEAD_SNAP="WITH RECURSIVE chain(sha) AS (
+  SELECT value FROM meta WHERE key = 'indexed_head_sha'
+  UNION ALL
+  SELECT p.parent_sha FROM commit_parents p JOIN chain ON p.sha = chain.sha
+  WHERE p.parent_idx = 0
+), head_snap AS (
+  SELECT c.sha FROM commits c JOIN chain USING (sha)
+  WHERE c.is_sampled ORDER BY c.authored_at DESC LIMIT 1
+)"
 
 sql_dump() {
   local name="$1"; shift
@@ -123,15 +148,11 @@ GROUP BY a.canonical_name
 ORDER BY commits DESC"
 
 log "→ _ownership (per-file author concentration, HEAD paths only)"
-sql_dump _ownership "WITH head_paths AS (
-  SELECT DISTINCT path FROM file_stats
-  WHERE sha = (SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1)
-), per_file AS (
+sql_dump _ownership "WITH per_file AS (
   SELECT lb.path, a.canonical_name AS author, COUNT(*) AS births
   FROM line_births lb
   JOIN commits c ON c.sha = lb.birth_sha
   JOIN authors a ON a.id = c.author_id
-  WHERE lb.path IN (SELECT path FROM head_paths)
   GROUP BY lb.path, a.canonical_name
 ), totals AS (
   SELECT path, SUM(births) AS tot FROM per_file GROUP BY path
@@ -157,16 +178,12 @@ FROM b FULL OUTER JOIN d ON b.bkt = d.bkt
 ORDER BY died DESC LIMIT 30"
 
 log "→ _longlived (day-1 code still in HEAD)"
-sql_dump _longlived "WITH head_paths AS (
-  SELECT DISTINCT path FROM file_stats
-  WHERE sha = (SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1)
-), first_bucket AS (
+sql_dump _longlived "WITH first_bucket AS (
   SELECT MIN(birth_bucket) AS b FROM line_births
 )
 SELECT lb.path, MIN(lb.birth_bucket) AS earliest, COUNT(*) AS lines_from_that_day
 FROM line_births lb, first_bucket fb
-WHERE lb.path IN (SELECT path FROM head_paths)
-  AND lb.birth_bucket = fb.b
+WHERE lb.birth_bucket = fb.b
 GROUP BY lb.path
 ORDER BY lines_from_that_day DESC LIMIT 20"
 
@@ -251,15 +268,11 @@ ORDER BY bucket, code DESC"
 log "→ _subtree_ownership (per top-level dir bus-factor rollup)"
 # Repo bus factor 5 can hide subtree bus factor 1. Include when repo has
 # >= 3 substantive top-level dirs (see monorepo lens trigger).
-sql_dump _subtree_ownership "WITH head_paths AS (
-  SELECT DISTINCT path FROM file_stats
-  WHERE sha = (SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1)
-), per_file_owner AS (
+sql_dump _subtree_ownership "WITH per_file_owner AS (
   SELECT lb.path, a.canonical_name AS author, COUNT(*) AS births
   FROM line_births lb
   JOIN commits c ON c.sha = lb.birth_sha
   JOIN authors a ON a.id = c.author_id
-  WHERE lb.path IN (SELECT path FROM head_paths)
   GROUP BY lb.path, a.canonical_name
 ), file_top AS (
   SELECT path,
@@ -281,7 +294,7 @@ log "→ _func_longevity (per-function birth, span, rewrite count via body_hash)
 # One row per (path, name, kind) that has ever appeared. Distinct body_hash
 # count = number of rewrites. Kind is taken from the latest snapshot in case
 # a function was reclassified (fn → test after a #[test] attr was added).
-sql_dump _func_longevity "WITH snap_bounds AS (
+sql_dump _func_longevity "$HEAD_SNAP, snap_bounds AS (
   SELECT f.path, f.name,
          MIN(c.bucket_key) AS first_bucket,
          MAX(c.bucket_key) AS last_bucket,
@@ -305,7 +318,7 @@ sql_dump _func_longevity "WITH snap_bounds AS (
   GROUP BY f.path, f.name
 ), current_head AS (
   SELECT DISTINCT f.path, f.name FROM funcs f
-  WHERE f.sha = (SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1)
+  WHERE f.sha = (SELECT sha FROM head_snap)
 )
 SELECT sb.path, sb.name, lk.kind,
        sb.first_bucket, sb.last_bucket, sb.snapshots,
@@ -353,13 +366,8 @@ LIMIT 50"
     (SELECT COUNT(*) FROM hunks)          AS hunk_rows,
     (SELECT COUNT(*) FROM line_births)    AS line_births_rows" --format table
   echo
-  echo "-- languages by current LOC --"
-  "$BIN" --repo "$REPO" sql "SELECT fs.language, SUM(fs.code) AS code
-    FROM file_stats fs
-    JOIN commits c ON c.sha = fs.sha
-    WHERE c.bucket_key = (SELECT MAX(bucket_key) FROM commits WHERE is_sampled)
-    GROUP BY fs.language
-    ORDER BY code DESC" --format table
+  echo "-- HEAD snapshot by language --"
+  "$BIN" --repo "$REPO" stats --format table
 } >"$OUT/_summary.txt" 2>/dev/null || true
 
 log "done → $OUT"

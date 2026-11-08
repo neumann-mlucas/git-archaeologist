@@ -36,33 +36,37 @@ If no path given, the script uses `$PWD`. First run indexes; subsequent runs are
 
 The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 
-| File                      | What it holds                                                                                                                                                                                                                              |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `burndown-lang.tsv`       | cumulative LOC per bucket, per language                                                                                                                                                                                                    |
-| `burndown-author.tsv`     | running net-contribution per author per bucket                                                                                                                                                                                             |
-| `cohort.tsv`              | alive lines per (bucket, birth_bucket) — the theseus stack                                                                                                                                                                                 |
-| `survival.tsv`            | births / alive / dead / survival ratio per cohort                                                                                                                                                                                          |
-| `survival-fit.tsv`        | half-life scalar via exponential fit (or `reason` if <100 deaths)                                                                                                                                                                          |
-| `coupling.tsv`            | top-50 file pairs by co-commit                                                                                                                                                                                                             |
-| `classify.tsv`            | commits + fix/feat/revert/breaking/untyped per bucket                                                                                                                                                                                      |
-| `hotspot-<lang>.tsv`      | top-30 funcs by churn, one file per tree-sitter lang present (rust, python, javascript, typescript, tsx, go, c, cpp, lua, vim-script, java, ruby, bash, php, ocaml, scala, haskell, kotlin, csharp, swift); langs with no data are dropped |
-| `age.tsv`                 | file age histogram, 7-day bins — columns: `age_days_bucket`, `files`. Bucket into 5 tiers for the report (0-90d / 90d-1yr / 1-2yr / 2-5yr / 5yr+)                                                                                          |
-| `churn-module.tsv`        | added/deleted per top-level dir per bucket (`churn --by module --depth 1`)                                                                                                                                                                 |
-| `churn-module-d2.tsv`     | same at second-level path granularity (`churn --by module --depth 2`) — reach for this when `src`, `runtime`, `test` are the top rows and hide where the churn actually lives                                                              |
-| `churn-author.tsv`        | added/deleted per author per bucket                                                                                                                                                                                                        |
-| `_meta.txt`               | index metadata (schema version, indexed head sha, commit count)                                                                                                                                                                            |
-| `_summary.txt`            | quick totals: commits, tags, contributors, LOC, languages                                                                                                                                                                                  |
-| `_authors.tsv`            | per-author tenure: commits, first/last commit ts, active_days, days_since_last                                                                                                                                                             |
-| `_ownership.tsv`          | files where one author wrote >80% of the lines (HEAD paths only)                                                                                                                                                                           |
-| `_birth_death.tsv`        | born vs died lines per bucket, sorted by died — auto-detects big deletion events                                                                                                                                                           |
-| `_longlived.tsv`          | day-1 files still in HEAD, with line counts from the first bucket                                                                                                                                                                          |
-| `_tag_gaps.tsv`           | tag inter-arrival distribution (under_1h / under_1d / under_1w / over_1w)                                                                                                                                                                  |
-| `_ai_trailers.tsv`        | per-bucket AI Co-Authored-By count (Claude/Copilot/GPT/Codex/Cursor/Aider). Empty = no AI co-authorship in repo                                                                                                                            |
-| `_off_hours.tsv`          | per-author `off_hours_ratio_utc` (weekend or outside 09-18 UTC) + `weekend_ratio_utc`. Min 20 commits. Timezones lost — treat as UTC                                                                                                       |
-| `_comment_density.tsv`    | per-(bucket, language) `code`, `comments`, `blanks`, `comment_ratio = comments/(code+comments)`                                                                                                                                            |
-| `_subtree_ownership.tsv`  | per top-level dir: `head_files`, `single_owner_files` (>80% share), `avg_top_share`, `total_line_births`. Subtree bus-factor rollup                                                                                                        |
-| `_cross_module_pairs.tsv` | file pairs from different top-level dirs, co-committed ≥3× in commits touching <50 files. Leaky-boundary detector                                                                                                                          |
-| `_func_longevity.tsv`     | per (path, name): `first_bucket`, `last_bucket`, `snapshots`, `rewrites` (distinct `funcs.body_hash` count), `min_len`/`max_len`, `alive_at_head`. Top 200 by rewrite count. Cursed-core / fossil-API detector                             |
+| File                      | What it holds                                                                                                                                                                                                                                                                                                                      |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `burndown-lang.tsv`       | cumulative LOC per bucket, per language                                                                                                                                                                                                                                                                                            |
+| `burndown-author.tsv`     | running net-contribution per author per bucket                                                                                                                                                                                                                                                                                     |
+| `cohort.tsv`              | alive lines per (bucket, birth_bucket) — the theseus stack                                                                                                                                                                                                                                                                         |
+| `survival.tsv`            | births / alive / dead / survival ratio per cohort                                                                                                                                                                                                                                                                                  |
+| `survival-fit.tsv`        | half-life scalar via exponential fit (or `reason` if <100 deaths)                                                                                                                                                                                                                                                                  |
+| `coupling.tsv`            | top-50 file pairs by co-commit                                                                                                                                                                                                                                                                                                     |
+| `classify.tsv`            | commits + fix/feat/revert/breaking/untyped per bucket                                                                                                                                                                                                                                                                              |
+| `hotspot-<lang>.tsv`      | top-300 (bucket, func) rows by churn, sorted desc (head = top hotspots; the depth feeds the trajectory check), one file per tree-sitter lang present (rust, python, javascript, typescript, tsx, go, c, cpp, lua, vim-script, java, ruby, bash, php, ocaml, scala, haskell, kotlin, csharp, swift); langs with no data are dropped |
+| `age.tsv`                 | file age histogram, 7-day bins — columns: `age_days_bucket`, `files`. Bucket into 5 tiers for the report (0-90d / 90d-1yr / 1-2yr / 2-5yr / 5yr+)                                                                                                                                                                                  |
+| `churn-module.tsv`        | added/deleted per top-level dir per bucket (`churn --by module --depth 1`)                                                                                                                                                                                                                                                         |
+| `churn-module-d2.tsv`     | same at second-level path granularity (`churn --by module --depth 2`) — reach for this when `src`, `runtime`, `test` are the top rows and hide where the churn actually lives                                                                                                                                                      |
+| `churn-author.tsv`        | added/deleted per author per bucket                                                                                                                                                                                                                                                                                                |
+| `burndown-kind.tsv`       | cumulative LOC per bucket split `code` vs `test` (static test detection: test dirs/file conventions + `#[cfg(test)]`, `def test_*`, `describe(...)`, etc.)                                                                                                                                                                         |
+| `stats-lang.tsv`          | HEAD snapshot per language: files, lines, code, comments, blanks, `test_code`, `test_pct`, funcs, `max_func`, `median_age_days`, `owner`, `owner_pct`, `churn_90d`; last row `Total`. `other` = files with no known language (lines only)                                                                                          |
+| `stats-dir.tsv`           | same, per top-level dir (`.` = root files). Fastest per-subtree view of test share, age and owner                                                                                                                                                                                                                                  |
+| `stats-since-tag.tsv`     | per-language delta from the newest tag before HEAD (`since_tag` in `_meta.txt`) to HEAD; `test_pct` in percentage points. Absent on untagged repos. Grammar-less files are not counted                                                                                                                                             |
+| `_meta.txt`               | index metadata (`schema_version`, `bucket_size`, `indexed_head_sha`, `since_tag`)                                                                                                                                                                                                                                                  |
+| `_summary.txt`            | quick totals (commits, merges, tags, authors) + the `stats` table at HEAD                                                                                                                                                                                                                                                          |
+| `_authors.tsv`            | per-author tenure: commits, first/last commit ts, active_days, days_since_last                                                                                                                                                                                                                                                     |
+| `_ownership.tsv`          | files where one author wrote >80% of the lines (HEAD paths only)                                                                                                                                                                                                                                                                   |
+| `_birth_death.tsv`        | born vs died lines per bucket, sorted by died — auto-detects big deletion events                                                                                                                                                                                                                                                   |
+| `_longlived.tsv`          | day-1 files still in HEAD, with line counts from the first bucket                                                                                                                                                                                                                                                                  |
+| `_tag_gaps.tsv`           | tag inter-arrival distribution (under_1h / under_1d / under_1w / over_1w)                                                                                                                                                                                                                                                          |
+| `_ai_trailers.tsv`        | per-bucket AI Co-Authored-By count (Claude/Copilot/GPT/Codex/Cursor/Aider). Empty = no AI co-authorship in repo                                                                                                                                                                                                                    |
+| `_off_hours.tsv`          | per-author `off_hours_ratio_utc` (weekend or outside 09-18 UTC) + `weekend_ratio_utc`. Min 20 commits. Timezones lost — treat as UTC                                                                                                                                                                                               |
+| `_comment_density.tsv`    | per-(bucket, language) `code`, `comments`, `blanks`, `comment_ratio = comments/(code+comments)`                                                                                                                                                                                                                                    |
+| `_subtree_ownership.tsv`  | per top-level dir: `head_files`, `single_owner_files` (>80% share), `avg_top_share`, `total_line_births`. Subtree bus-factor rollup                                                                                                                                                                                                |
+| `_cross_module_pairs.tsv` | file pairs from different top-level dirs, co-committed ≥3× in commits touching <50 files. Leaky-boundary detector                                                                                                                                                                                                                  |
+| `_func_longevity.tsv`     | per (path, name): `first_bucket`, `last_bucket`, `snapshots`, `rewrites` (distinct `funcs.body_hash` count), `min_len`/`max_len`, `alive_at_head`. Top 200 by rewrite count. Cursed-core / fossil-API detector                                                                                                                     |
 
 Read each with `Read` — TSVs, so first line is headers. For big tables (>200 rows), read the head + tail rather than the whole file.
 
@@ -106,7 +110,6 @@ _Generated by git-archaeologist on {YYYY-MM-DD}. Indexed HEAD: {short-sha}._
       v = buckets[name]
       print(f"{name:<10} {chr(9608)*int(v/m*30):<30} {v}")'
   ```
-````
 
 Read the header of `age.tsv` first — column names vary by schema version.
 
@@ -145,6 +148,7 @@ Read the header of `age.tsv` first — column names vary by schema version.
       by_yr[b[:4]].add(a)
   for y in sorted(by_yr): print(f"{y}\t{len(by_yr[y])}")'
   ```
+- **Since last release** — `stats-since-tag.tsv` (when present): per-language code and test-code delta since `since_tag`. One line: "since v0.24: +1.2k Rust, +400 test lines, test share +2pp".
 - So-what: name the regime + one sentence on whether growth is coming from more people or the same people writing more.
 
 ## Cohort survival
@@ -153,7 +157,8 @@ Read the header of `age.tsv` first — column names vary by schema version.
 - Yearly-survival bar chart. Call out outliers (fast decay or unusual persistence).
 - **Decay-shape callout from `cohort.tsv`** — pick 2-3 birth-buckets (oldest, one mid-life, most recent stable) and describe the shape of the decay: "steep first year then flat" (initial-scaffolding decay), "linear grind" (steady rewrite pressure), "cliff at bucket X" (a single rewrite killed the cohort). One sentence; don't paste the curve. Use this recipe:
   ```bash
-  awk -F'\t' -v b=201422 '$2==b {print $1"\t"$3}' cohort.tsv | tail -30
+  # b = a cohort key copied from survival.tsv (same format as bucket_size)
+  awk -F'\t' -v b=20161009 '$2==b {print $1"\t"$3}' cohort.tsv | tail -30
   ```
 - **Caveat when repo is dormant** (see Cadence): a latest-year cohort at >85% survival is a freeze artifact, not durability. Say so.
 - Add a one-line "day-1 survivors" callout from `_longlived.tsv` — the top file(s) with the most first-bucket lines still in HEAD are either the stable core or the ossified boilerplate; name them.
@@ -178,6 +183,7 @@ Read the header of `age.tsv` first — column names vary by schema version.
       print(b+"\t"+"\t".join(str(by_bucket[b].get(l,0)) for l in langs))'
   ```
   Look for crossover rows; that's your headline.
+- **Current mix and test share** — `stats-lang.tsv` at HEAD. Quote `test_pct` for the main language(s); an `other` row with many lines usually means lockfiles, data or vendored assets, not code.
 
 ## Contributors & bus factor
 
@@ -207,6 +213,7 @@ Read the header of `age.tsv` first — column names vary by schema version.
   ```
   Cite the count found (e.g. "3 bot identities present but all outside top 20") — never claim clean without running the check.
 - **Per-file concentration from `_ownership.tsv`** replaces the old "run git blame on top hotspots" step. Show top 5–10 rows with `share > 0.8`. Skip generated code (`*.pb.go`, `*_gen.py`, etc.) — high concentration there is trivial.
+- **Per-dir owner at HEAD** — `stats-dir.tsv` `owner` + `owner_pct` (share of surviving lines). Quick bus-factor read per subtree before reaching for `_subtree_ownership.tsv`.
 - If a large contributor's net went flat OR their `days_since_last` is >90d, name them + when.
 - So-what: name the bus factor and the person(s) it depends on. If several top authors have high `days_since_last`, connect that to any dormancy flagged in Cadence.
 
@@ -257,8 +264,8 @@ Read the header of `age.tsv` first — column names vary by schema version.
 
 - **Max 3 items.** Each MUST reference an unresolved finding from a section above by name. No speculative queries.
 - Example: "Contributors section says 9 new committers in 30d — check merge latency to test whether backlog is growing" — ties to a real section.
-
 ````
+
 ## Optional lenses
 
 Beyond the core sections above. Each lens has a trigger condition — include when repo shape justifies it, otherwise skip. All lenses use existing dumps + raw `sql` or `git log`; no re-index needed. Same "so what" discipline applies.
@@ -316,35 +323,33 @@ Trigger: `_func_longevity.tsv` non-empty (tree-sitter parsed at least one snapsh
 Trigger: always safe. Especially load-bearing for repos where "is this well-tested" or "is this a config platform" matters.
 
 - **Comment density per language over time** — `_comment_density.tsv`. Trend `comment_ratio` per top-3 languages across buckets. Rising = doc culture / AI inflation; falling = code outpacing docs. Compare across languages: Rust/Go idiomatic doc-comments should sit higher than JS/Python inline habits.
-- **Test-file pairing per top-level dir** — path glob at HEAD, count `*_test.*` / `*.test.*` / `test_*` / under `tests?/` vs prod files. Any prod dir with zero tests = red flag.
+- **Test share per top-level dir** — `stats-dir.tsv` `test_code` / `test_pct`. Counts inline tests too (`#[cfg(test)]`, `def test_*`, `describe(...)`), not just test files. Any prod dir with `test_pct = 0` and substantial code = red flag.
+- **Test share over time** — `burndown-kind.tsv`: `test / (code + test)` per milestone year. Rising = test culture improving; falling = code outpacing tests.
 - **Config-vs-code ratio** — sum `_comment_density.tsv` `code` where `language IN ('YAML','JSON','TOML','HCL','Dockerfile')` vs everything else. Rising config share past 30% = platform drift (k8s/terraform/pipelines eating the codebase).
 - **Generated-code split** — flag `vendor/`, `node_modules/`, `dist/`, `*.pb.go`, `*_gen.*`, `*_pb2.py`. Report handwritten LOC separately in TL;DR when generated exceeds 20% of HEAD LOC. Cleans every other signal that treats machine output as human work.
-- Recipe (test-file pairing, path-only, no dump needed):
-  ```bash
-  duckdb -c "SELECT split_part(file, '/', 1) AS subtree,
-    SUM(CASE WHEN regexp_matches(file, '(_test\.|\.test\.|/test_|/tests?/|^test_|^tests?/)') THEN 1 ELSE 0 END) AS test_files,
-    SUM(CASE WHEN NOT regexp_matches(file, '(_test\.|\.test\.|/test_|/tests?/|^test_|^tests?/)') THEN 1 ELSE 0 END) AS prod_files
-    FROM read_csv('/dev/stdin', columns={'file':'VARCHAR'}, header=false)
-    GROUP BY subtree ORDER BY prod_files DESC" < <(git -C "$REPO" ls-files)
-  ```
 - So-what: any prod dir with zero tests; any repo where config >30% of LOC (name it as platform, not app); comment-ratio trend direction per language.
 
 ## SQL extractions (design notes)
 
-The `sql` subcommand hits the DuckDB index directly. `run.sh` dumps five extra TSVs that the built-in subcommands don't cover; use them per the section instructions above. Key tables in the schema (v2):
+The `sql` subcommand hits the DuckDB index directly. `run.sh` dumps eleven `_*.tsv` files that the built-in subcommands don't cover; use them per the section instructions above. Key tables (schema v7; check `_meta.txt`):
 
-- `commits` — sha, author_id, committer_id, authored_at, is_merge, is_sampled, bucket_key, msg_type, is_breaking, is_revert
+- `commits` — sha, author_id, committer_id, authored_at, is_merge, is_sampled, bucket_key, msg_type, is_breaking, is_revert, ignored_blame, message
+- `commit_parents` — sha, parent_sha, parent_idx (0 = first parent)
+- `commit_trailers` — sha, author_id, role (lowercased, e.g. `coauthor`)
 - `authors` — id, canonical_name, canonical_email
-- `line_births` — path, line_no, birth_sha, birth_bucket (no death_sha — deaths are derived from `file_churn.deleted` per bucket)
-- `file_churn` — sha, path, added, deleted
-- `file_stats` — sha, path, language, code (LOC snapshot per sampled commit)
+- `author_aliases` — author_id, raw_name, raw_email
+- `line_births` — path, line_no, birth_sha, birth_bucket: one row per line alive at HEAD, so `DISTINCT path` = HEAD's file set (no death_sha — deaths are derived from `file_churn.deleted` per bucket)
+- `file_churn` — sha, path, added, deleted, language
+- `file_stats` — sha, path, language, code, comments, blanks, test_code (snapshot per sampled commit; one sampled commit per bucket)
 - `hunks` — sha, path, prev_path, old_start/len, new_start/len (rename hops here)
 - `tags` — name, sha, tagged_at
-- `funcs` — sha, path, name, kind, start_line, end_line
+- `funcs` — sha, path, name, kind, start_line, end_line, body_hash
+- `meta` — key, value (`schema_version`, `bucket_size`, `indexed_head_sha`)
 
 Gotchas:
+
 - Timestamp math: `authored_at` is UNIX epoch (BIGINT). Wrap with `to_timestamp(...)` before `date_diff` / `current_timestamp`, or the parser mis-binds to `age(BIGINT, BIGINT)` and errors out.
-- HEAD-alive filtering: use `SELECT sha FROM commits WHERE is_sampled ORDER BY authored_at DESC LIMIT 1` — there's no `is_head` flag, and non-sampled commits may lack a `file_stats` snapshot.
+- HEAD-alive filtering: for files, use `SELECT DISTINCT path FROM line_births`. For a HEAD `file_stats` / `funcs` snapshot, walk HEAD's first-parent chain from `meta.indexed_head_sha` and take the newest sampled commit (the `$HEAD_SNAP` CTE in `run.sh`). Do **not** use "newest sampled commit": every ref is walked, so it can be on a branch ahead of HEAD. For current totals prefer `stats-lang.tsv`, which is exact.
 - No death→author link. `line_births` has no `death_sha`. Deletion attribution ("who deleted whose code") would need custom fold logic — not available via SQL. Don't promise it in reports.
 
 If you want an ad-hoc extraction not covered by the dumps, run `git-archaeologist --repo <repo> sql "<query>" --format tsv` directly.
@@ -381,7 +386,7 @@ for l in open("burndown-lang.tsv").readlines()[1:]:
 last_of = {}
 for b in sorted(by_bkt): last_of[str(b)[:4]] = b
 top = sorted(by_bkt[max(by_bkt)], key=lambda k:-by_bkt[max(by_bkt)][k])[:5]
-print(f"{\"year\":<6}" + "".join(f"{k:>14}" for k in top))
+print("year".ljust(6) + "".join(f"{k:>14}" for k in top))
 for y in years:
     if y not in last_of: continue
     r = by_bkt[last_of[y]]
@@ -392,7 +397,7 @@ for y in years:
 top-N authors, age tiers):
 
 ```bash
-python3 -c 'import sys; rows=[l.rstrip().split("\t") for l in sys.stdin if l.strip()]; m=max(float(r[-1]) for r in rows); [print(f"{r[0]:<18} {"█"*int(float(r[-1])/m*40):<40} {r[-1]}") for r in rows]' < top.tsv
+python3 -c 'import sys; rows=[l.rstrip().split("\t") for l in sys.stdin if l.strip()]; m=max(float(r[-1]) for r in rows); [print(f"{r[0]:<18} {chr(9608)*int(float(r[-1])/m*40):<40} {r[-1]}") for r in rows]' < top.tsv
 ```
 
 **Sparklines** are a fallback only — when a milestone table would
@@ -418,7 +423,7 @@ Rules for plots in the report:
 
 ## Reach for `sql`
 
-The 13 canned dumps cover 90% of questions. Anything else (function
+The canned dumps cover 90% of questions. Anything else (function
 authored by whom, files added by cohort X still on disk, revert
 patterns per module, etc.) goes through the raw `sql` subcommand:
 
@@ -471,4 +476,3 @@ Trigger examples:
 - `/git-arch-analyze /path/to/repo` → analyze that repo
 - `/git-arch-analyze --report /tmp/report.md` → write report elsewhere
   (default is `<repo>/ARCHAEOLOGY.md`)
-````
