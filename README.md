@@ -10,6 +10,15 @@ age. Output is TSV / CSV / JSON / Parquet; pipe it to your plotter.
 One DuckDB cache per repo. After the first index every query returns in
 under a second.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/survival-dark.svg">
+  <img alt="ratatui: lines written per year and the share still alive at HEAD. 2016: 7%, 2017: 16%, 2018: 57%, 2019: 26%, 2020: 44%, 2021: 63%, 2022: 287 lines, 2023: 80%." src="docs/survival-light.svg">
+</picture>
+
+ratatui at v0.25, from `survival`. 93% of 2016's code is gone; almost
+nothing was written in 2022 before the 2023 revival. Young code survives
+more by construction: it has had less time to be replaced.
+
 ```
 $ git-archaeologist stats          # uv, top rows
 Lang      Files    Code  Comments  Test %  Funcs  Age Days  Owner
@@ -138,9 +147,10 @@ branch are born at the merge that landed them.
 
 ### `cohort`
 
-Surviving LOC per bucket, stacked by birth cohort
-(`bucket, cohort, alive_lines`): the series behind a git-of-theseus
-stream plot.
+Lines alive at HEAD per bucket, stacked by birth cohort
+(`bucket, cohort, alive_lines`). Only HEAD survivors are tracked, so a
+cohort's band is flat once born: this shows what today's code is made
+of, not a git-of-theseus decay curve. For decay, use `survival`.
 
 ### `coupling`
 

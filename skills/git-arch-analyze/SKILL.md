@@ -40,7 +40,7 @@ The script writes these files under `/tmp/gitarch-<name>-<ts>/`:
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `burndown-lang.tsv`       | cumulative LOC per bucket, per language                                                                                                                                                                                                                                                                                            |
 | `burndown-author.tsv`     | running net-contribution per author per bucket                                                                                                                                                                                                                                                                                     |
-| `cohort.tsv`              | alive lines per (bucket, birth_bucket) — the theseus stack                                                                                                                                                                                                                                                                         |
+| `cohort.tsv`              | lines alive at HEAD per (bucket, birth cohort). Flat once born (only HEAD survivors are tracked): composition of today's code, not a decay curve                                                                                                                                                                                   |
 | `survival.tsv`            | births / alive / dead / survival ratio per cohort                                                                                                                                                                                                                                                                                  |
 | `survival-fit.tsv`        | half-life scalar via exponential fit (or `reason` if <100 deaths)                                                                                                                                                                                                                                                                  |
 | `coupling.tsv`            | top-50 file pairs by co-commit                                                                                                                                                                                                                                                                                                     |
@@ -153,13 +153,16 @@ Read the header of `age.tsv` first — column names vary by schema version.
 
 ## Cohort survival
 
-- Interpret `cohort.tsv` + `survival.tsv`. Quote half-life from `survival-fit.tsv` **only if** `reason` is `ok` AND the value is less than 10× the repo's total age in days — the exponential fit blows up when a recent giant cohort hasn't had time to decay. Otherwise ignore the number and just describe the yearly table.
+- Interpret `survival.tsv`. Quote half-life from `survival-fit.tsv` **only if** `reason` is `ok` AND the value is less than 10× the repo's total age in days — the exponential fit blows up when a recent giant cohort hasn't had time to decay. Otherwise ignore the number and just describe the yearly table.
 - Yearly-survival bar chart. Call out outliers (fast decay or unusual persistence).
-- **Decay-shape callout from `cohort.tsv`** — pick 2-3 birth-buckets (oldest, one mid-life, most recent stable) and describe the shape of the decay: "steep first year then flat" (initial-scaffolding decay), "linear grind" (steady rewrite pressure), "cliff at bucket X" (a single rewrite killed the cohort). One sentence; don't paste the curve. Use this recipe:
+- **What HEAD is made of** — `cohort.tsv` at its last bucket: lines alive at HEAD per birth cohort. One line like "40% of today's code predates 2020". Never describe a decay shape from `cohort.tsv`; its bands never shrink. Recipe:
   ```bash
-  # b = a cohort key copied from survival.tsv (same format as bucket_size)
-  awk -F'\t' -v b=20161009 '$2==b {print $1"\t"$3}' cohort.tsv | tail -30
+  duckdb -c "SELECT cohort // 10000 AS year, SUM(alive_lines) AS alive_at_head
+    FROM read_csv('cohort.tsv')
+    WHERE bucket = (SELECT MAX(bucket) FROM read_csv('cohort.tsv'))
+    GROUP BY 1 ORDER BY 1"
   ```
+  `cohort // 10000` gives the year for `Day` buckets; use `// 100` for `Week` / `Month`.
 - **Caveat when repo is dormant** (see Cadence): a latest-year cohort at >85% survival is a freeze artifact, not durability. Say so.
 - Add a one-line "day-1 survivors" callout from `_longlived.tsv` — the top file(s) with the most first-bucket lines still in HEAD are either the stable core or the ossified boilerplate; name them.
 - So-what: does this repo keep code or churn it?
@@ -290,7 +293,7 @@ Trigger: `_ai_trailers.tsv` non-empty AND ≥10 AI-tagged commits total. Or repo
     FROM commits WHERE regexp_matches(lower(message), '(claude|copilot|chatgpt|cursor|codex|aider)')
     GROUP BY bucket_key ORDER BY bucket_key" --format tsv
   ```
-- **Cohort survival split** — post-adoption birth-buckets from `cohort.tsv` / `survival.tsv` at matched age vs pre-adoption cohorts. Faster decay = AI output revised more (correlation, not causation).
+- **Cohort survival split** — post-adoption birth-buckets in `survival.tsv` vs pre-adoption ones of similar age (young code survives more by construction, so compare like with like). Faster decay = AI output revised more (correlation, not causation).
 - **Comment-density shift** — `_comment_density.tsv` `comment_ratio` per language across the adoption boundary. AI often inflates comment density; call the delta.
 - **Commit-size shift** — median LOC/commit pre vs post-adoption via `sql` over `file_churn`. Rising size + rising reverts = "AI drafts, humans miss bugs".
 - **Function rewrite bursts** — `_func_longevity.tsv` `rewrites` per function post-adoption. Cursed-core hotspots that keep getting AI-rewritten point at churn-prone areas.
